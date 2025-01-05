@@ -12,6 +12,10 @@ from sklearn.ensemble import GradientBoostingClassifier
 import pandas_ta as ta
 import asyncio
 from telegram import Bot
+import time
+import asyncio
+from binance.exceptions import BinanceAPIException
+from telegram.error import TelegramError
 
 # Config dosyasını yükle
 with open("config.json") as f:
@@ -39,34 +43,60 @@ timeframe = config["timeframe"]
 limit = config["limit"]
 
 # Telegram bildirim fonksiyonu
-def send_telegram_message(message):
-    bot = Bot(token=telegram_bot_token)
-    bot.send_message(chat_id=chat_id, text=message)
-
+async def send_telegram_message(message):
+    try:
+        bot = Bot(token=telegram_bot_token)
+        async with bot:
+            await bot.send_message(chat_id=chat_id, text=message)
+        logging.info(f"Telegram message sent: {message}")
+    except Exception as e:
+        logging.error(f"Telegram message error: {str(e)}")
+        
+        
 def calculate_indicators(df):
-    df['close'] = pd.to_numeric(df['close'], errors='coerce')
-    df['high'] = pd.to_numeric(df['high'], errors='coerce')
-    df['low'] = pd.to_numeric(df['low'], errors='coerce')
-    df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
-    df['EMA12'] = df['close'].ewm(span=12, adjust=False).mean()
-    df['EMA26'] = df['close'].ewm(span=26, adjust=False).mean()
-    df['RSI'] = ta.rsi(df['close'], length=14)
-    df['MACD'], df['MACDSignal'], df['MACDHist'] = ta.macd(df['close'], fast=12, slow=26, signal=9)
-    bb = ta.bbands(df['close'], length=20, std=2)
-    df['UpperBand'] = bb['BBU_20_2.0']
-    df['MiddleBand'] = bb['BBM_20_2.0']
-    df['LowerBand'] = bb['BBL_20_2.0']
-    df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-    df['Momentum'] = df['close'].diff(10)
-    adx = ta.adx(df['high'], df['low'], df['close'], length=14)
-    df['ADX'] = adx['ADX_14']
-    df['DI+'] = adx['DMP_14']
-    df['DI-'] = adx['DMN_14']
-    df['OBV'] = ta.obv(df['close'], df['volume'])
-    stoch_rsi = ta.stochrsi(df['close'], length=14)
-    df['StochRSI_K'] = stoch_rsi['STOCHRSIk_14_14_3_3']
-    df['StochRSI_D'] = stoch_rsi['STOCHRSId_14_14_3_3']
-    return df
+    try:
+        # Önce veri tiplerini dönüştür ve NaN değerleri temizle
+        for col in ['close', 'high', 'low', 'volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # NaN değerleri doldur
+        df = df.fillna(method='ffill').fillna(method='bfill')
+        
+        # İndikatörleri hesapla
+        df['EMA12'] = ta.ema(df['close'], length=12)
+        df['EMA26'] = ta.ema(df['close'], length=26)
+        df['RSI'] = ta.rsi(df['close'], length=14)
+        macd = ta.macd(df['close'])
+        df['MACD'] = macd['MACD_12_26_9']
+        df['MACDSignal'] = macd['MACDSb_12_26_9']
+        df['MACDHist'] = macd['MACDh_12_26_9']
+        
+        bb = ta.bbands(df['close'], length=20, std=2)
+        df['UpperBand'] = bb['BBU_20_2.0']
+        df['MiddleBand'] = bb['BBM_20_2.0']
+        df['LowerBand'] = bb['BBL_20_2.0']
+        
+        df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        df['Momentum'] = df['close'].diff(10)
+        
+        adx = ta.adx(df['high'], df['low'], df['close'], length=14)
+        df['ADX'] = adx['ADX_14']
+        df['DI+'] = adx['DMP_14']
+        df['DI-'] = adx['DMN_14']
+        
+        df['OBV'] = ta.obv(df['close'], df['volume'])
+        
+        stoch_rsi = ta.stochrsi(df['close'], length=14)
+        df['StochRSI_K'] = stoch_rsi['STOCHRSIk_14_14_3_3']
+        df['StochRSI_D'] = stoch_rsi['STOCHRSId_14_14_3_3']
+        
+        # Son kontrol ve temizlik
+        df = df.fillna(method='ffill').fillna(0)
+        return df
+        
+    except Exception as e:
+        logging.error(f"calculate_indicators error: {str(e)}")
+        return df
 
 def detect_candlestick_patterns(df):
     # İkili Tepe Formasyonu
@@ -339,59 +369,103 @@ def backtest(symbol, df, atr_multiplier=2.0, risk_percentage=0.01):
 
 # Ana işlev
 def main():
-    # Fetch all valid futures symbols from Binance
-    valid_symbols = [s['symbol'] for s in client.futures_exchange_info()['symbols']]
-    
-    for symbol in symbols:
-        if symbol not in valid_symbols:
-            logging.warning(f"Symbol {symbol} is not valid on Binance Futures. Skipping...")
-            continue
-        
-        logging.info(f"Processing symbol: {symbol}")
+    while True:
         try:
-            historical_klines = client.futures_klines(symbol=symbol, interval=timeframe, limit=limit)
-        except BinanceAPIException as e:
-            logging.error(f"Error fetching klines for symbol {symbol}: {e}")
-            continue
-        
-        df = pd.DataFrame(historical_klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        
-        if len(df) < 21:
-            logging.warning(f"Not enough data for symbol {symbol}. Skipping...")
-            continue
-        
-        df = calculate_indicators(df)
-        df = detect_candlestick_patterns(df)
-        df = detect_rectangle_pattern(df)
-        df = detect_flag_pennant_pattern(df)
-        df = detect_cone_patterns(df)
-        
-        # Debug: Print DataFrame shape and head
-        logging.info(f"DataFrame shape: {df.shape}")
-        logging.info(df.head())
-        
-        if df.empty:
-            logging.warning(f"DataFrame is empty after processing for symbol {symbol}. Skipping...")
-            continue
-        
-        # Ensure all feature columns are numeric and drop rows with NaN values
-        features = ['EMA12', 'EMA26', 'RSI', 'MACD', 'UpperBand', 'LowerBand', 'ATR', 'Momentum', 'ADX', 'OBV', 'StochRSI_K', 'StochRSI_D',
-                    'DoubleTop', 'DoubleBottom', 'HeadShoulders', 'InverseHeadShoulders', 'Cup', 'Handle', 'InverseCup', 'InverseHandle',
-                    'Rectangle', 'Flag', 'Pennant', 'RisingWedge', 'FallingWedge']
-        
-        df[features] = df[features].apply(pd.to_numeric, errors='coerce')
-        df = df.dropna(subset=features)
-        
-        if df.empty:
-            logging.warning(f"DataFrame is empty after dropping NaN values for symbol {symbol}. Skipping...")
-            continue
-        
-        model, scaler = train_ml_model(df)
-        
-        if model is not None and scaler is not None:
-            backtest(symbol, df)
+            for symbol in symbols:
+                logging.info(f"Processing symbol: {symbol}")
+                
+                # Mum verilerini al
+                historical_klines = client.futures_klines(symbol=symbol, interval=timeframe, limit=limit)
+                
+                # DataFrame oluştur
+                df = pd.DataFrame(historical_klines, columns=[
+                    'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                    'close_time', 'quote_asset_volume', 'number_of_trades',
+                    'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+                ])
+                
+                # Veri tiplerini dönüştür
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df.set_index('timestamp', inplace=True)
+                
+                # İndikatörleri hesapla
+                df = calculate_indicators(df)
+                
+                # Formasyonları tespit et
+                df = detect_candlestick_patterns(df)
+                df = detect_rectangle_pattern(df)
+                df = detect_flag_pennant_pattern(df)
+                df = detect_cone_patterns(df)
+                
+                if not df.empty:
+                    model, scaler = train_ml_model(df)
+                    
+                    if model is not None and scaler is not None:
+                        # Son veriye göre tahmin yap
+                        prediction = predict_with_ml(model, scaler, df)
+                        
+                        # İşlem sinyali varsa
+                        if prediction in ["LONG", "SHORT"]:
+                            # Risk yönetimi
+                            try:
+                                balance = float(client.futures_account_balance()[0]['balance'])
+                                atr = df['ATR'].iloc[-1]
+                                is_valid, position_size = dynamic_risk_management(
+                                    balance, atr, risk_per_trade, prediction
+                                )
+                                
+                                if is_valid:
+                                    # Stop loss ve take profit belirle
+                                    stop_loss, take_profit = define_targets(df)
+                                    
+                                    # Kaldıraç ayarla
+                                    client.futures_change_leverage(
+                                        symbol=symbol,
+                                        leverage=leverage
+                                    )
+                                    
+                                    # İşlem aç
+                                    order = place_order(
+                                        symbol, prediction, position_size,
+                                        stop_loss, take_profit
+                                    )
+                                    
+                                    asyncio.run(send_telegram_message(
+                                        f"New {prediction} order placed for {symbol}\n"
+                                        f"Entry: {df['close'].iloc[-1]}\n"
+                                        f"Stop Loss: {stop_loss}\n"
+                                        f"Take Profit: {take_profit}\n"
+                                        f"Position Size: {position_size}"
+                                    ))
+                                    
+                            except Exception as e:
+                                logging.error(f"Trading error for {symbol}: {str(e)}")
+                                continue
+                
+                # Her symbol arasında kısa bekleme
+                time.sleep(1)
+            
+            # Her döngü sonunda bekleme
+            time.sleep(60)
+            
+        except Exception as e:
+            logging.error(f"Main loop error: {str(e)}")
+            time.sleep(60)
 
 if __name__ == "__main__":
-    main()
+    try:
+        # Binance futures bağlantısını test et
+        client.futures_account_balance()
+        
+        # Telegram bağlantısını test et
+        asyncio.run(send_telegram_message("Bot started successfully!"))
+        
+        # Ana döngüyü başlat
+        main()
+        
+    except Exception as e:
+        logging.error(f"Startup error: {str(e)}")
+        
