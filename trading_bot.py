@@ -66,10 +66,6 @@ def calculate_indicators(df):
     stoch_rsi = ta.stochrsi(df['close'], length=14)
     df['StochRSI_K'] = stoch_rsi['STOCHRSIk_14_14_3_3']
     df['StochRSI_D'] = stoch_rsi['STOCHRSId_14_14_3_3']
-
-    # NaN değerleri doldur
-    df.fillna(0, inplace=True)
-
     return df
 
 def detect_candlestick_patterns(df):
@@ -343,6 +339,7 @@ def backtest(symbol, df, atr_multiplier=2.0, risk_percentage=0.01):
 
 # Ana işlev
 def main():
+    # Fetch all valid futures symbols from Binance
     valid_symbols = [s['symbol'] for s in client.futures_exchange_info()['symbols']]
     
     for symbol in symbols:
@@ -371,6 +368,7 @@ def main():
         df = detect_flag_pennant_pattern(df)
         df = detect_cone_patterns(df)
         
+        # Debug: Print DataFrame shape and head
         logging.info(f"DataFrame shape: {df.shape}")
         logging.info(df.head())
         
@@ -378,22 +376,22 @@ def main():
             logging.warning(f"DataFrame is empty after processing for symbol {symbol}. Skipping...")
             continue
         
+        # Ensure all feature columns are numeric and drop rows with NaN values
         features = ['EMA12', 'EMA26', 'RSI', 'MACD', 'UpperBand', 'LowerBand', 'ATR', 'Momentum', 'ADX', 'OBV', 'StochRSI_K', 'StochRSI_D',
                     'DoubleTop', 'DoubleBottom', 'HeadShoulders', 'InverseHeadShoulders', 'Cup', 'Handle', 'InverseCup', 'InverseHandle',
                     'Rectangle', 'Flag', 'Pennant', 'RisingWedge', 'FallingWedge']
         
         df[features] = df[features].apply(pd.to_numeric, errors='coerce')
-        df.fillna(0, inplace=True)  # Fill NaN values instead of dropping
+        df = df.dropna(subset=features)
         
         if df.empty:
-            logging.warning(f"DataFrame is empty after filling NaN values for symbol {symbol}. Skipping...")
+            logging.warning(f"DataFrame is empty after dropping NaN values for symbol {symbol}. Skipping...")
             continue
         
         model, scaler = train_ml_model(df)
         
         if model is not None and scaler is not None:
             backtest(symbol, df)
-
 
 if __name__ == "__main__":
     main()
