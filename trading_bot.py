@@ -72,30 +72,30 @@ def detect_candlestick_patterns(df):
     # İkili Tepe Formasyonu
     df['DoubleTop'] = 0
     for i in range(1, len(df) - 1):
-        if df['high'][i - 1] > df['high'][i] and df['high'][i] < df['high'][i + 1]:
+        if df['high'].iloc[i - 1] > df['high'].iloc[i] and df['high'].iloc[i] < df['high'].iloc[i + 1]:
             df.at[i, 'DoubleTop'] = 1
             
     # İkili Dip Formasyonu
     df['DoubleBottom'] = 0
     for i in range(1, len(df) - 1):
-        if df['low'][i - 1] < df['low'][i] and df['low'][i] > df['low'][i + 1]:
+        if df['low'].iloc[i - 1] < df['low'].iloc[i] and df['low'].iloc[i] > df['low'].iloc[i + 1]:
             df.at[i, 'DoubleBottom'] = 1
 
     # OBO (Omuz Baş Omuz)
     df['HeadShoulders'] = 0
     for i in range(20, len(df) - 20):
-        left_shoulder = df['low'][i - 20] < df['low'][i - 10]
-        head = df['low'][i] < df['low'][i - 20] and df['low'][i] < df['low'][i + 20]
-        right_shoulder = df['low'][i + 20] < df['low'][i + 10]
+        left_shoulder = df['low'].iloc[i - 20] < df['low'].iloc[i - 10]
+        head = df['low'].iloc[i] < df['low'].iloc[i - 20] and df['low'].iloc[i] < df['low'].iloc[i + 20]
+        right_shoulder = df['low'].iloc[i + 20] < df['low'].iloc[i + 10]
         if left_shoulder and head and right_shoulder:
             df.at[i, 'HeadShoulders'] = 1
 
     # TOBO (Ters Omuz Baş Omuz)
     df['InverseHeadShoulders'] = 0
     for i in range(20, len(df) - 20):
-        left_shoulder = df['low'][i - 20] < df['low'][i - 10]
-        head = df['low'][i] < df['low'][i - 20] and df['low'][i] < df['low'][i + 20]
-        right_shoulder = df['low'][i + 20] < df['low'][i + 10]
+        left_shoulder = df['low'].iloc[i - 20] < df['low'].iloc[i - 10]
+        head = df['low'].iloc[i] < df['low'].iloc[i - 20] and df['low'].iloc[i] < df['low'].iloc[i + 20]
+        right_shoulder = df['low'].iloc[i + 20] < df['low'].iloc[i + 10]
         if left_shoulder and head and right_shoulder:
             df.at[i, 'InverseHeadShoulders'] = 1
 
@@ -105,14 +105,14 @@ def detect_candlestick_patterns(df):
     min_depth = 10
     min_height = 5
     for i in range(min_depth, len(df) - min_depth):
-        potential_cup = (df['low'][i - min_depth:i].min() == df['low'][i - min_depth:i].iloc[0])
-        potential_cup &= (df['high'][i] > df['high'][i - min_depth - 1])
+        potential_cup = (df['low'].iloc[i - min_depth:i].min() == df['low'].iloc[i - min_depth:i].iloc[0])
+        potential_cup &= (df['high'].iloc[i] > df['high'].iloc[i - min_depth - 1])
         if potential_cup:
             df.at[i, 'Cup'] = 1
             
-        if df['Cup'][i - min_depth] == 1:
-            handle_high = df['high'][i] < df['high'][i - min_depth] * 0.98
-            handle_low = df['low'][i] > df['low'][i - min_depth] * 0.98
+        if df['Cup'].iloc[i - min_depth] == 1:
+            handle_high = df['high'].iloc[i] < df['high'].iloc[i - min_depth] * 0.98
+            handle_low = df['low'].iloc[i] > df['low'].iloc[i - min_depth] * 0.98
             if handle_high and handle_low:
                 df.at[i, 'Handle'] = 1
 
@@ -120,14 +120,14 @@ def detect_candlestick_patterns(df):
     df['InverseCup'] = 0
     df['InverseHandle'] = 0
     for i in range(min_depth, len(df) - min_depth):
-        potential_cup = (df['high'][i - min_depth:i].max() == df['high'][i - min_depth:i].iloc[0])
-        potential_cup &= (df['low'][i] < df['low'][i - min_depth - 1])
+        potential_cup = (df['high'].iloc[i - min_depth:i].max() == df['high'].iloc[i - min_depth:i].iloc[0])
+        potential_cup &= (df['low'].iloc[i] < df['low'].iloc[i - min_depth - 1])
         if potential_cup:
             df.at[i, 'InverseCup'] = 1
             
-        if df['InverseCup'][i - min_depth] == 1:
-            handle_high = df['low'][i] > df['low'][i - min_depth] * 0.98
-            handle_low = df['high'][i] < df['high'][i - min_depth] * 0.98
+        if df['InverseCup'].iloc[i - min_depth] == 1:
+            handle_high = df['low'].iloc[i] > df['low'].iloc[i - min_depth] * 0.98
+            handle_low = df['high'].iloc[i] < df['high'].iloc[i - min_depth] * 0.98
             if handle_high and handle_low:
                 df.at[i, 'InverseHandle'] = 1
 
@@ -146,30 +146,45 @@ def detect_flag_pennant_pattern(df):
     df['Flag'] = 0
     df['Pennant'] = 0
     for i in range(1, len(df) - 1):
-        if (df['high'][i - 1] < df['high'][i] and df['low'][i] < df['low'][i - 1]) or (df['high'][i - 1] > df['high'][i] and df['low'][i] > df['low'][i - 1]):
-            df.at[i, 'Flag'] = 1
+        if (df['high'].iloc[i - 1] < df['high'].iloc[i] and df['low'].iloc[i] < df['low'].iloc[i - 1]) or (df['high'].iloc[i - 1] > df['high'].iloc[i] and df['low'].iloc[i] > df['low'].iloc[i - 1]):
+            df.at[df.index[i], 'Flag'] = 1
         
-        if (df['high'][i - 1] < df['high'][i] and df['high'][i] > df['high'][i + 1] and df['low'][i - 1] < df['low'][i] and df['low'][i] < df['low'][i + 1]):
-            df.at[i, 'Pennant'] = 1
+        if (df['high'].iloc[i - 1] < df['high'].iloc[i] and df['high'].iloc[i] > df['high'].iloc[i + 1] and df['low'].iloc[i - 1] < df['low'].iloc[i] and df['low'].iloc[i] < df['low'].iloc[i + 1]):
+            df.at[df.index[i], 'Pennant'] = 1
     return df
 
 def detect_cone_patterns(df):
     df['RisingWedge'] = 0
     df['FallingWedge'] = 0
     for i in range(10, len(df) - 10):
-        if df['high'][i - 10] < df['high'][i] and df['high'][i] < df['high'][i + 10] and df['low'][i - 10] > df['low'][i] and df['low'][i] > df['low'][i + 10]:
-            df.at[i, 'RisingWedge'] = 1
-        if df['high'][i - 10] > df['high'][i] and df['high'][i] > df['high'][i + 10] and df['low'][i - 10] < df['low'][i] and df['low'][i] < df['low'][i + 10]:
-            df.at[i, 'FallingWedge'] = 1
+        if df['high'].iloc[i - 10] < df['high'].iloc[i] and df['high'].iloc[i] < df['high'].iloc[i + 10] and df['low'].iloc[i - 10] > df['low'].iloc[i] and df['low'].iloc[i] > df['low'].iloc[i + 10]:
+            df.at[df.index[i], 'RisingWedge'] = 1
+        if df['high'].iloc[i - 10] > df['high'].iloc[i] and df['high'].iloc[i] > df['high'].iloc[i + 10] and df['low'].iloc[i - 10] < df['low'].iloc[i] and df['low'].iloc[i] < df['low'].iloc[i + 10]:
+            df.at[df.index[i], 'FallingWedge'] = 1
     return df
 
 # ML modeli eğitimi
 def train_ml_model(df):
     df['Target'] = (df['close'].shift(-1) > df['close']).astype(int)  # Sonraki mumda fiyatın artışına dayalı hedef
-    features = ['EMA12', 'EMA26', 'RSI', 'MACD', 'UpperBand', 'LowerBand', 'ATR', 'Momentum', 'ADX', 'OBV', 'StochasticRSI',
+    features = ['EMA12', 'EMA26', 'RSI', 'MACD', 'UpperBand', 'LowerBand', 'ATR', 'Momentum', 'ADX', 'OBV', 'StochRSI_K', 'StochRSI_D',
                 'DoubleTop', 'DoubleBottom', 'HeadShoulders', 'InverseHeadShoulders', 'Cup', 'Handle', 'InverseCup', 'InverseHandle',
                 'Rectangle', 'Flag', 'Pennant', 'RisingWedge', 'FallingWedge']
-    X = df[features].dropna()
+
+    # Ensure all feature columns are numeric
+    df[features] = df[features].apply(pd.to_numeric, errors='coerce')
+
+    # Drop rows with any NaN values in the features columns
+    df = df.dropna(subset=features)
+
+    # Debug: Print DataFrame shape and head after dropping NaN values
+    logging.info(f"DataFrame shape after dropping NaN values: {df.shape}")
+    logging.info(df.head())
+
+    if df.empty:
+        logging.warning("DataFrame is empty after dropping NaN values. Cannot train model.")
+        return None, None
+
+    X = df[features]
     y = df['Target'].iloc[X.index]
 
     # Train-Test Split
@@ -200,10 +215,9 @@ def train_ml_model(df):
     joblib.dump(scaler, 'scaler.pkl')  # Scaler'ı kaydet
 
     return model, scaler
-
 # ML modeli ile tahmin
 def predict_with_ml(model, scaler, df):
-    features = ['EMA12', 'EMA26', 'RSI', 'MACD', 'UpperBand', 'LowerBand', 'ATR', 'Momentum', 'ADX', 'OBV', 'StochasticRSI',
+    features = ['EMA12', 'EMA26', 'RSI', 'MACD', 'UpperBand', 'LowerBand', 'ATR', 'Momentum', 'ADX', 'OBV', 'StochRSI_K', 'StochRSI_D',
                 'DoubleTop', 'DoubleBottom', 'HeadShoulders', 'InverseHeadShoulders', 'Cup', 'Handle', 'InverseCup', 'InverseHandle',
                 'Rectangle', 'Flag', 'Pennant', 'RisingWedge', 'FallingWedge']
     X_live = scaler.transform(df[features].iloc[[-1]])  # Son veriyi al
@@ -320,14 +334,33 @@ def backtest(symbol, df, atr_multiplier=2.0, risk_percentage=0.01):
     send_telegram_message(f"Total Trades: {trades}, Final Balance: {balance}")
     return balance, trades
 
+
+
+
 # Ana işlev
 def main():
+    # Fetch all valid futures symbols from Binance
+    valid_symbols = [s['symbol'] for s in client.futures_exchange_info()['symbols']]
+    
     for symbol in symbols:
+        if symbol not in valid_symbols:
+            logging.warning(f"Symbol {symbol} is not valid on Binance Futures. Skipping...")
+            continue
+        
         logging.info(f"Processing symbol: {symbol}")
-        historical_klines = client.futures_klines(symbol=symbol, interval=timeframe, limit=limit)
+        try:
+            historical_klines = client.futures_klines(symbol=symbol, interval=timeframe, limit=limit)
+        except BinanceAPIException as e:
+            logging.error(f"Error fetching klines for symbol {symbol}: {e}")
+            continue
+        
         df = pd.DataFrame(historical_klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
+        
+        if len(df) < 21:
+            logging.warning(f"Not enough data for symbol {symbol}. Skipping...")
+            continue
         
         df = calculate_indicators(df)
         df = detect_candlestick_patterns(df)
@@ -335,9 +368,30 @@ def main():
         df = detect_flag_pennant_pattern(df)
         df = detect_cone_patterns(df)
         
+        # Debug: Print DataFrame shape and head
+        logging.info(f"DataFrame shape: {df.shape}")
+        logging.info(df.head())
+        
+        if df.empty:
+            logging.warning(f"DataFrame is empty after processing for symbol {symbol}. Skipping...")
+            continue
+        
+        # Ensure all feature columns are numeric and drop rows with NaN values
+        features = ['EMA12', 'EMA26', 'RSI', 'MACD', 'UpperBand', 'LowerBand', 'ATR', 'Momentum', 'ADX', 'OBV', 'StochRSI_K', 'StochRSI_D',
+                    'DoubleTop', 'DoubleBottom', 'HeadShoulders', 'InverseHeadShoulders', 'Cup', 'Handle', 'InverseCup', 'InverseHandle',
+                    'Rectangle', 'Flag', 'Pennant', 'RisingWedge', 'FallingWedge']
+        
+        df[features] = df[features].apply(pd.to_numeric, errors='coerce')
+        df = df.dropna(subset=features)
+        
+        if df.empty:
+            logging.warning(f"DataFrame is empty after dropping NaN values for symbol {symbol}. Skipping...")
+            continue
+        
         model, scaler = train_ml_model(df)
         
-        backtest(symbol, df)
+        if model is not None and scaler is not None:
+            backtest(symbol, df)
 
 if __name__ == "__main__":
     main()
