@@ -55,22 +55,25 @@ async def send_telegram_message(message):
         
 def calculate_indicators(df):
     try:
-        # Önce veri tiplerini dönüştür ve NaN değerleri temizle
+        # Convert data types and clean NaN values
         for col in ['close', 'high', 'low', 'volume']:
             df[col] = pd.to_numeric(df[col], errors='coerce')
         
-        # NaN değerleri doldur
-        df = df.fillna(method='ffill').fillna(method='bfill')
+        # Use ffill() and bfill() instead of fillna(method='ffill')
+        df = df.ffill().bfill()
         
-        # İndikatörleri hesapla
+        # Calculate indicators
         df['EMA12'] = ta.ema(df['close'], length=12)
         df['EMA26'] = ta.ema(df['close'], length=26)
         df['RSI'] = ta.rsi(df['close'], length=14)
+        
+        # Fix MACD calculation
         macd = ta.macd(df['close'])
         df['MACD'] = macd['MACD_12_26_9']
-        df['MACDSignal'] = macd['MACDSb_12_26_9']
+        df['MACDSignal'] = macd['MACDs_12_26_9']  # Changed from MACDSb to MACDs
         df['MACDHist'] = macd['MACDh_12_26_9']
         
+        # Calculate other indicators
         bb = ta.bbands(df['close'], length=20, std=2)
         df['UpperBand'] = bb['BBU_20_2.0']
         df['MiddleBand'] = bb['BBM_20_2.0']
@@ -90,8 +93,16 @@ def calculate_indicators(df):
         df['StochRSI_K'] = stoch_rsi['STOCHRSIk_14_14_3_3']
         df['StochRSI_D'] = stoch_rsi['STOCHRSId_14_14_3_3']
         
-        # Son kontrol ve temizlik
-        df = df.fillna(method='ffill').fillna(0)
+        # Final cleanup using new methods
+        df = df.ffill().fillna(0)
+        
+        # Verify all required columns exist
+        required_columns = ['UpperBand', 'LowerBand', 'ATR', 'Momentum', 
+                          'ADX', 'OBV', 'StochRSI_K', 'StochRSI_D']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            logging.error(f"Missing columns: {missing_columns}")
+            
         return df
         
     except Exception as e:
