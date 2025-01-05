@@ -261,6 +261,11 @@ def predict_with_ml(model, scaler, df):
     features = ['EMA12', 'EMA26', 'RSI', 'MACD', 'UpperBand', 'LowerBand', 'ATR', 'Momentum', 'ADX', 'OBV', 'StochRSI_K', 'StochRSI_D',
                 'DoubleTop', 'DoubleBottom', 'HeadShoulders', 'InverseHeadShoulders', 'Cup', 'Handle', 'InverseCup', 'InverseHandle',
                 'Rectangle', 'Flag', 'Pennant', 'RisingWedge', 'FallingWedge']
+    
+    if df.empty or len(df) < 1:
+        logging.error("DataFrame is empty or does not have enough rows for prediction.")
+        return None
+    
     X_live = scaler.transform(df[features].iloc[[-1]])  # Son veriyi al
     prediction = model.predict(X_live)[0]
     return "LONG" if prediction == 1 else "SHORT"
@@ -400,6 +405,7 @@ def main():
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                 
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df['timestamp'] = df['timestamp'].apply(lambda x: int(x.timestamp()))
                 df.set_index('timestamp', inplace=True)
                 
                 # İndikatörleri hesapla
@@ -465,7 +471,7 @@ def main():
         except Exception as e:
             logging.error(f"Main loop error: {str(e)}")
             time.sleep(60)
-
+            
 if __name__ == "__main__":
     try:
         # Binance futures bağlantısını test et
@@ -479,4 +485,3 @@ if __name__ == "__main__":
         
     except Exception as e:
         logging.error(f"Startup error: {str(e)}")
-        
