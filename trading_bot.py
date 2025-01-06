@@ -206,70 +206,91 @@ def detect_cone_patterns(df):
 
 # ML modeli eğitimi
 def train_ml_model(df):
-    df['Target'] = (df['close'].shift(-1) > df['close']).astype(int)  # Sonraki mumda fiyatın artışına dayalı hedef
-    features = ['EMA12', 'EMA26', 'RSI', 'MACD', 'UpperBand', 'LowerBand', 'ATR', 'Momentum', 'ADX', 'OBV', 'StochRSI_K', 'StochRSI_D',
-                'DoubleTop', 'DoubleBottom', 'HeadShoulders', 'InverseHeadShoulders', 'Cup', 'Handle', 'InverseCup', 'InverseHandle',
-                'Rectangle', 'Flag', 'Pennant', 'RisingWedge', 'FallingWedge']
+    try:
+        df['Target'] = (df['close'].shift(-1) > df['close']).astype(int)  # Sonraki mumda fiyatın artışına dayalı hedef
+        
+        features = ['EMA12', 'EMA26', 'RSI', 'MACD', 'UpperBand', 'LowerBand', 'ATR', 'Momentum', 
+                    'ADX', 'OBV', 'StochRSI_K', 'StochRSI_D',
+                    'DoubleTop', 'DoubleBottom', 'HeadShoulders', 'InverseHeadShoulders', 
+                    'Cup', 'Handle', 'InverseCup', 'InverseHandle',
+                    'Rectangle', 'Flag', 'Pennant', 'RisingWedge', 'FallingWedge']
 
-    # Ensure all feature columns are numeric
-    df[features] = df[features].apply(pd.to_numeric, errors='coerce')
+        # Tüm feature sütunlarının sayısal olduğundan emin olun
+        df[features] = df[features].apply(pd.to_numeric, errors='coerce')
 
-    # Drop rows with any NaN values in the features columns
-    df = df.dropna(subset=features)
+        # Feature sütunlarında eksik verileri kaldır
+        df = df.dropna(subset=features)
 
-    # Debug: Print DataFrame shape and head after dropping NaN values
-    logging.info(f"DataFrame shape after dropping NaN values: {df.shape}")
-    logging.info(df.head())
+        logging.info(f"DataFrame shape after dropping NaN values: {df.shape}")
+        logging.info(df.head())
 
-    if df.empty:
-        logging.warning("DataFrame is empty after dropping NaN values. Cannot train model.")
+        if df.empty:
+            logging.warning("DataFrame is empty after dropping NaN values. Cannot train model.")
+            return None, None
+
+        # X ve y veri setlerini oluştur
+        X = df[features]
+        y = df.loc[X.index, 'Target']
+
+        # Eğitim ve test bölmesi
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(X_train)
+        X_test = scaler.transform(X_test)
+
+        # Model hiperparametre optimizasyonu
+        param_grid = {
+            'n_estimators': [100, 200, 300, 500],
+            'learning_rate': [0.01, 0.05, 0.1],
+            'max_depth': [3, 5, 7],
+            'min_samples_split': [2, 5, 10],
+            'min_samples_leaf': [1, 2, 4]
+        }
+        model = GradientBoostingClassifier(random_state=42)
+
+        grid_search = RandomizedSearchCV(estimator=model, param_distributions=param_grid, 
+                                         n_iter=50, cv=3, n_jobs=-1, random_state=42)
+        grid_search.fit(X_train, y_train)
+        model = grid_search.best_estimator_
+
+        accuracy = model.score(X_test, y_test)
+        logging.info(f"Makine öğrenimi modeli doğruluğu: {accuracy:.2f}")
+        asyncio.run(send_telegram_message(f"Makine öğrenimi modeli doğruluğu: {accuracy:.2f}"))
+
+        # Model ve scaler'ı kaydet
+        joblib.dump(model, 'ml_model.pkl')
+        joblib.dump(scaler, 'scaler.pkl')
+
+        return model, scaler
+
+    except Exception as e:
+        logging.error(f"train_ml_model error: {str(e)}")
         return None, None
-
-    X = df[features]
-    y = df['Target'].iloc[X.index]
-
-    # Train-Test Split
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    scaler = StandardScaler()
-    X_train = scaler.fit_transform(X_train)
-    X_test = scaler.transform(X_test)
-
-    # Model Hiperparametre Optimizasyonu
-    param_grid = {
-        'n_estimators': [100, 200, 300, 500],
-        'learning_rate': [0.01, 0.05, 0.1],
-        'max_depth': [3, 5, 7],
-        'min_samples_split': [2, 5, 10],
-        'min_samples_leaf': [1, 2, 4]
-    }
-    model = GradientBoostingClassifier(random_state=42)
-
-    grid_search = RandomizedSearchCV(estimator=model, param_distributions=param_grid, n_iter=50, cv=3, n_jobs=-1, random_state=42)
-    grid_search.fit(X_train, y_train)
-    model = grid_search.best_estimator_
-
-    accuracy = model.score(X_test, y_test)
-    logging.info(f"Makine öğrenimi modeli doğruluğu: {accuracy:.2f}")
-    send_telegram_message(f"Makine öğrenimi modeli doğruluğu: {accuracy:.2f}")
-
-    joblib.dump(model, 'ml_model.pkl')  # Modeli kaydet
-    joblib.dump(scaler, 'scaler.pkl')  # Scaler'ı kaydet
-
-    return model, scaler
 # ML modeli ile tahmin
 def predict_with_ml(model, scaler, df):
-    features = ['EMA12', 'EMA26', 'RSI', 'MACD', 'UpperBand', 'LowerBand', 'ATR', 'Momentum', 'ADX', 'OBV', 'StochRSI_K', 'StochRSI_D',
-                'DoubleTop', 'DoubleBottom', 'HeadShoulders', 'InverseHeadShoulders', 'Cup', 'Handle', 'InverseCup', 'InverseHandle',
-                'Rectangle', 'Flag', 'Pennant', 'RisingWedge', 'FallingWedge']
-    
-    if df.empty or len(df) < 1:
-        logging.error("DataFrame is empty or does not have enough rows for prediction.")
-        return None
-    
-    X_live = scaler.transform(df[features].iloc[[-1]])  # Son veriyi al
-    prediction = model.predict(X_live)[0]
-    return "LONG" if prediction == 1 else "SHORT"
+    try:
+        features = ['EMA12', 'EMA26', 'RSI', 'MACD', 'UpperBand', 'LowerBand', 'ATR', 'Momentum', 
+                    'ADX', 'OBV', 'StochRSI_K', 'StochRSI_D',
+                    'DoubleTop', 'DoubleBottom', 'HeadShoulders', 'InverseHeadShoulders', 
+                    'Cup', 'Handle', 'InverseCup', 'InverseHandle',
+                    'Rectangle', 'Flag', 'Pennant', 'RisingWedge', 'FallingWedge']
 
+        # Fill NaN values with the mean of the respective columns
+        df[features] = df[features].fillna(df[features].mean())
+
+        # Check for NaN values in features
+        if df[features].isnull().sum().sum() > 0:
+            logging.error("NaN values found in features, skipping prediction.")
+            return None
+
+        # En son satırdan tahmin yapmak
+        X_live = scaler.transform(df[features].iloc[[-1]])
+        prediction = model.predict(X_live)[0]
+        return "LONG" if prediction == 1 else "SHORT"
+
+    except Exception as e:
+        logging.error(f"predict_with_ml error: {str(e)}")
+        return None
 # Zamanlı Stop-Loss ve Kademeli Stop-Loss fonksiyonları
 def time_based_stop_loss(df, time_period=60):
     last_price = df['close'].iloc[-1]
@@ -408,8 +429,18 @@ def main():
                 df['timestamp'] = df['timestamp'].apply(lambda x: int(x.timestamp()))
                 df.set_index('timestamp', inplace=True)
                 
+                # Ensure DataFrame has enough rows
+                if len(df) < 1:
+                    logging.warning(f"DataFrame for {symbol} is empty or does not have enough rows.")
+                    continue
+                
                 # İndikatörleri hesapla
                 df = calculate_indicators(df)
+                
+                # Ensure DataFrame has enough rows after calculating indicators
+                if len(df) < 1:
+                    logging.warning(f"DataFrame for {symbol} is empty or does not have enough rows after calculating indicators.")
+                    continue
                 
                 # Formasyonları tespit et
                 df = detect_candlestick_patterns(df)
@@ -422,6 +453,10 @@ def main():
                     
                     if model is not None and scaler is not None:
                         # Son veriye göre tahmin yap
+                        if len(df) < 1:
+                            logging.warning(f"DataFrame for {symbol} does not have enough rows for prediction.")
+                            continue
+                        
                         prediction = predict_with_ml(model, scaler, df)
                         
                         # İşlem sinyali varsa
@@ -429,6 +464,10 @@ def main():
                             # Risk yönetimi
                             try:
                                 balance = float(client.futures_account_balance()[0]['balance'])
+                                if len(df) < 1:
+                                    logging.warning(f"DataFrame for {symbol} does not have enough rows for ATR calculation.")
+                                    continue
+                                
                                 atr = df['ATR'].iloc[-1]
                                 is_valid, position_size = dynamic_risk_management(
                                     balance, atr, risk_per_trade, prediction
