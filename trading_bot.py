@@ -3,6 +3,7 @@ import numpy as np
 import json
 import joblib
 from binance.client import Client
+from binance.exceptions import BinanceAPIException  # Remove APIError
 import logging
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,10 +14,7 @@ import pandas_ta as ta
 import asyncio
 from telegram import Bot
 import time
-import asyncio
-from binance.exceptions import BinanceAPIException
-from telegram.error import TelegramError
-
+import sys  # Add this import
 # Config dosyasını yükle
 with open("config.json") as f:
     config = json.load(f)
@@ -207,61 +205,102 @@ def detect_cone_patterns(df):
 # ML modeli eğitimi
 def train_ml_model(df):
     try:
-        df['Target'] = (df['close'].shift(-1) > df['close']).astype(int)  # Sonraki mumda fiyatın artışına dayalı hedef
+        # Add more features for better prediction
+        df['Price_Change'] = df['close'].pct_change()
+        df['Volume_Change'] = df['volume'].pct_change()
+        df['High_Low_Range'] = (df['high'] - df['low']) / df['low']
+        df['Close_Open_Range'] = (df['close'] - df['open']) / df['open']
         
-        features = ['EMA12', 'EMA26', 'RSI', 'MACD', 'UpperBand', 'LowerBand', 'ATR', 'Momentum', 
-                    'ADX', 'OBV', 'StochRSI_K', 'StochRSI_D',
-                    'DoubleTop', 'DoubleBottom', 'HeadShoulders', 'InverseHeadShoulders', 
-                    'Cup', 'Handle', 'InverseCup', 'InverseHandle',
-                    'Rectangle', 'Flag', 'Pennant', 'RisingWedge', 'FallingWedge']
+        # Add rolling means
+        df['Price_MA5'] = df['close'].rolling(window=5).mean()
+        df['Price_MA20'] = df['close'].rolling(window=20).mean()
+        df['Volume_MA5'] = df['volume'].rolling(window=5).mean()
+        
+        # Add momentum indicators
+        df['ROC'] = (df['close'] / df['close'].shift(10) - 1) * 100
+        df['MFI'] = ta.mfi(df['high'], df['low'], df['close'], df['volume'])
+        
+        # Create target with more sophisticated logic
+        df['Target'] = ((df['close'].shift(-1) > df['close']) & 
+                       (df['volume'] > df['volume'].rolling(window=20).mean()) &
+                       (df['RSI'] < 70) & (df['RSI'] > 30)).astype(int)
 
-        # Tüm feature sütunlarının sayısal olduğundan emin olun
+        features = [
+            'EMA12', 'EMA26', 'RSI', 'MACD', 'UpperBand', 'LowerBand', 'ATR', 
+            'Momentum', 'ADX', 'OBV', 'StochRSI_K', 'StochRSI_D',
+            'Price_Change', 'Volume_Change', 'High_Low_Range', 'Close_Open_Range',
+            'Price_MA5', 'Price_MA20', 'Volume_MA5', 'ROC', 'MFI',
+            'DoubleTop', 'DoubleBottom', 'HeadShoulders', 'InverseHeadShoulders',
+            'Cup', 'Handle', 'InverseCup', 'InverseHandle',
+            'Rectangle', 'Flag', 'Pennant', 'RisingWedge', 'FallingWedge'
+        ]
+
+        # Handle NaN values more carefully
         df[features] = df[features].apply(pd.to_numeric, errors='coerce')
+        df = df.dropna(subset=features + ['Target'])
 
-        # Feature sütunlarında eksik verileri kaldır
-        df = df.dropna(subset=features)
-
-        logging.info(f"DataFrame shape after dropping NaN values: {df.shape}")
-        logging.info(df.head())
-
-        if df.empty:
-            logging.warning("DataFrame is empty after dropping NaN values. Cannot train model.")
+        if df.empty or len(df) < 100:  # Ensure enough data
+            logging.warning("Not enough data for training")
             return None, None
 
-        # X ve y veri setlerini oluştur
         X = df[features]
-        y = df.loc[X.index, 'Target']
+        y = df['Target']
 
-        # Eğitim ve test bölmesi
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        # Split with proper time series consideration
+        train_size = int(len(df) * 0.8)
+        X_train = X[:train_size]
+        X_test = X[train_size:]
+        y_train = y[:train_size]
+        y_test = y[train_size:]
+
+        # Scale features
         scaler = StandardScaler()
-        X_train = scaler.fit_transform(X_train)
-        X_test = scaler.transform(X_test)
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
 
-        # Model hiperparametre optimizasyonu
+        # Improved hyperparameter grid
         param_grid = {
-            'n_estimators': [100, 200, 300, 500],
+            'n_estimators': [200, 300, 500],
             'learning_rate': [0.01, 0.05, 0.1],
             'max_depth': [3, 5, 7],
-            'min_samples_split': [2, 5, 10],
-            'min_samples_leaf': [1, 2, 4]
+            'min_samples_split': [5, 10],
+            'min_samples_leaf': [2, 4],
+            'subsample': [0.8, 0.9, 1.0]
         }
-        model = GradientBoostingClassifier(random_state=42)
 
-        grid_search = RandomizedSearchCV(estimator=model, param_distributions=param_grid, 
-                                         n_iter=50, cv=3, n_jobs=-1, random_state=42)
-        grid_search.fit(X_train, y_train)
+        model = GradientBoostingClassifier(random_state=42)
+        
+        # Cross validation with time series split
+        tscv = TimeSeriesSplit(n_splits=5)
+        
+        grid_search = RandomizedSearchCV(
+            estimator=model,
+            param_distributions=param_grid,
+            n_iter=20,
+            cv=tscv,
+            scoring='accuracy',
+            n_jobs=-1,
+            random_state=42
+        )
+
+        grid_search.fit(X_train_scaled, y_train)
         model = grid_search.best_estimator_
 
-        accuracy = model.score(X_test, y_test)
-        logging.info(f"Makine öğrenimi modeli doğruluğu: {accuracy:.2f}")
-        asyncio.run(send_telegram_message(f"Makine öğrenimi modeli doğruluğu: {accuracy:.2f}"))
+        # Evaluate model
+        train_accuracy = model.score(X_train_scaled, y_train)
+        test_accuracy = model.score(X_test_scaled, y_test)
+        
+        logging.info(f"Training accuracy: {train_accuracy:.2f}")
+        logging.info(f"Test accuracy: {test_accuracy:.2f}")
 
-        # Model ve scaler'ı kaydet
-        joblib.dump(model, 'ml_model.pkl')
-        joblib.dump(scaler, 'scaler.pkl')
-
-        return model, scaler
+        # Only save model if accuracy is above threshold
+        if test_accuracy > 0.55:  # Minimum threshold for useful predictions
+            joblib.dump(model, 'ml_model.pkl')
+            joblib.dump(scaler, 'scaler.pkl')
+            return model, scaler
+        else:
+            logging.warning("Model accuracy too low, not saving model")
+            return None, None
 
     except Exception as e:
         logging.error(f"train_ml_model error: {str(e)}")
@@ -404,8 +443,404 @@ def backtest(symbol, df, atr_multiplier=2.0, risk_percentage=0.01):
 
 
 
+def verify_api_permissions():
+    try:
+        # Test API key permissions
+        logging.info("Verifying API permissions...")
+        
+        # Check if API key exists and has correct format
+        if not api_key:
+            logging.error("API key is missing in config.json")
+            return False
+        if not api_secret:
+            logging.error("API secret is missing in config.json")
+            return False
+            
+        # Log API key length for debugging (without revealing the key)
+        logging.info(f"API key length: {len(api_key)}")
+        logging.info(f"API secret length: {len(api_secret)}")
+        
+        # Initialize test client with testnet first
+        test_client = Client(api_key, api_secret, testnet=True)
+        logging.info("Test client initialized")
+        
+        try:
+            # Test basic connectivity
+            test_client.ping()
+            logging.info("Successfully pinged Binance API")
+            
+            # Test futures API access
+            futures_account = test_client.futures_account()
+            logging.info("Successfully accessed futures account")
+            
+            # Get account info for permissions check
+            account_info = test_client.get_account()
+            permissions = account_info.get('permissions', [])
+            logging.info(f"Account permissions: {permissions}")
+            
+            # Check for required permissions
+            required_permissions = ['SPOT', 'FUTURES']
+            missing_permissions = [p for p in required_permissions if p not in permissions]
+            
+            if missing_permissions:
+                logging.error(f"Missing required permissions: {', '.join(missing_permissions)}")
+                logging.error("Please enable these permissions in your Binance account settings:")
+                for p in missing_permissions:
+                    logging.error(f"- {p}")
+                return False
+            
+            # Test futures-specific endpoints
+            try:
+                # Test futures data access
+                test_client.futures_exchange_info()
+                logging.info("Successfully accessed futures exchange info")
+                
+                # Test futures account balance
+                balance = test_client.futures_account_balance()
+                logging.info(f"Futures account balance verified: {len(balance)} currencies found")
+                
+            except BinanceAPIException as e:
+                logging.error(f"Futures-specific API test failed: {e}")
+                return False
+                
+            logging.info("All API permissions verified successfully")
+            return True
+            
+        except BinanceAPIException as e:
+            logging.error(f"API test failed during connectivity check: {e}")
+            return False
+            
+    except BinanceAPIException as e:
+        if e.code == -2015:
+            logging.error("Invalid API key, IP, or permissions. Please check:")
+            logging.error("1. API key and secret are correct in config.json")
+            logging.error("2. IP restriction is disabled or your IP is whitelisted")
+            logging.error("3. Futures trading is enabled for your account")
+            logging.error("4. API key has Futures trading permission")
+            logging.error(f"Full error: {str(e)}")
+        else:
+            logging.error(f"Binance API error code {e.code}: {str(e)}")
+        return False
+    except Exception as e:
+        logging.error(f"Unexpected error verifying API permissions: {str(e)}")
+        logging.error(f"Error type: {type(e).__name__}")
+        return False
+    
+
+def initialize_binance_client():
+    try:
+        logging.info("Initializing Binance client...")
+        
+        # Validate symbols first
+        is_valid, valid_symbols = validate_futures_symbols()
+        if not is_valid:
+            return None
+            
+        # Initialize client
+        client = Client(api_key, api_secret, testnet=True)  # Using testnet as specified in config
+        
+        # Configure futures settings for each valid symbol
+        for symbol_info in valid_symbols:
+            symbol = symbol_info['symbol']
+            try:
+                # Set margin type to ISOLATED
+                try:
+                    client.futures_change_margin_type(symbol=symbol, marginType='ISOLATED')
+                    logging.info(f"Set {symbol} to ISOLATED margin")
+                except BinanceAPIException as e:
+                    if e.code != -4046:  # Already ISOLATED
+                        raise e
+                
+                # Set leverage
+                client.futures_change_leverage(symbol=symbol, leverage=leverage)
+                logging.info(f"Set {symbol} leverage to {leverage}x")
+                
+            except BinanceAPIException as e:
+                logging.error(f"Error configuring {symbol}: {e}")
+                return None
+        
+        logging.info("Binance Futures client initialized successfully")
+        return client
+        
+    except Exception as e:
+        logging.error(f"Error initializing Binance client: {e}")
+        return None
+    
+
+def diagnose_api_setup():
+    logging.info("Running API setup diagnostics...")
+    
+    try:
+        # Test with spot API first (more permissive)
+        test_client = Client(api_key, api_secret)
+        
+        # Try basic endpoints
+        try:
+            test_client.get_system_status()
+            logging.info("✓ Basic API connectivity working")
+        except BinanceAPIException as e:
+            logging.error(f"✗ Basic connectivity failed: {e}")
+            return False
+
+        # Test futures specific endpoints
+        try:
+            test_client.futures_ping()
+            logging.info("✓ Futures API connectivity working")
+        except BinanceAPIException as e:
+            logging.error(f"✗ Futures connectivity failed: {e}")
+            return False
+
+        return True
+
+    except Exception as e:
+        logging.error(f"Diagnostic failed: {e}")
+        return False
+    
+
+def verify_futures_account():
+    try:
+        test_client = Client(api_key, api_secret)
+        
+        # Check futures account status
+        futures_account = test_client.futures_account()
+        logging.info(f"Futures account status: Active")
+        logging.info(f"Available balance: {futures_account['totalWalletBalance']} USDT")
+        
+        # Check if futures trading is enabled
+        if float(futures_account['totalWalletBalance']) <= 0:
+            logging.warning("Futures wallet balance is 0. Please transfer funds to your futures wallet")
+        
+        return True
+    except BinanceAPIException as e:
+        if e.code == -2015:
+            logging.error("Futures account not activated. Please activate futures trading in your Binance account")
+        else:
+            logging.error(f"Futures account verification failed: {e}")
+        return False 
+    
+def verify_futures_permissions():
+    logging.info("Verifying futures trading permissions...")
+    
+    try:
+        test_client = Client(api_key, api_secret)
+        
+        # Step 1: Check if futures account exists
+        try:
+            futures_account = test_client.futures_account()
+            logging.info("✓ Futures account accessed successfully")
+        except BinanceAPIException as e:
+            logging.error("✗ Could not access futures account. Please enable futures trading on Binance")
+            logging.error(f"Error: {e}")
+            return False
+
+        # Step 2: Check if USDT-M futures is enabled
+        try:
+            test_client.futures_get_position_mode()
+            logging.info("✓ USDT-M Futures enabled")
+        except BinanceAPIException as e:
+            logging.error("✗ USDT-M Futures not enabled")
+            logging.error("Please enable USDT-M futures trading in your Binance account")
+            return False
+
+        # Step 3: Verify margin type access
+        try:
+            test_client.futures_change_margin_type(symbol='BTCUSDT', marginType='ISOLATED')
+            logging.info("✓ Margin type modification permitted")
+        except BinanceAPIException as e:
+            if e.code != -4046:  # Already set to ISOLATED
+                logging.error("✗ Cannot modify margin type")
+                return False
+            else:
+                logging.info("✓ Margin type already set to ISOLATED")
+
+        # Step 4: Verify leverage modification
+        try:
+            test_client.futures_change_leverage(symbol='BTCUSDT', leverage=5)
+            logging.info("✓ Leverage modification permitted")
+        except BinanceAPIException as e:
+            logging.error("✗ Cannot modify leverage")
+            return False
+
+        logging.info("All futures permissions verified successfully")
+        return True
+
+    except BinanceAPIException as e:
+        logging.error(f"Futures verification failed: {e}")
+        if e.code == -2015:
+            logging.error("\nTo fix this:")
+            logging.error("1. Go to Binance.com -> API Management")
+            logging.error("2. Edit your API key")
+            logging.error("3. Enable 'Enable Futures' permission")
+            logging.error("4. Temporarily disable IP restrictions")
+            logging.error("5. Save changes and wait 5 minutes")
+        return False
+    except Exception as e:
+        logging.error(f"Unexpected error during futures verification: {e}")
+        return False      
+def validate_trading_symbols():
+    try:
+        test_client = Client(api_key, api_secret)
+        logging.info("Validating trading symbols...")
+        
+        # Get all valid futures symbols
+        exchange_info = test_client.futures_exchange_info()
+        valid_symbols = [s['symbol'] for s in exchange_info['symbols'] if s['status'] == 'TRADING']
+        
+        # Check if configured symbols are valid
+        invalid_symbols = [symbol for symbol in symbols if symbol not in valid_symbols]
+        
+        if invalid_symbols:
+            logging.error(f"Invalid symbols found: {', '.join(invalid_symbols)}")
+            logging.info("Valid USDT-M futures symbols include: BTCUSDT, ETHUSDT, BNBUSDT, etc.")
+            return False
+            
+        logging.info(f"Validated symbols: {', '.join(symbols)}")
+        return True
+        
+    except BinanceAPIException as e:
+        logging.error(f"Error validating symbols: {e}")
+        return False  
+    
+def validate_futures_symbols():
+    try:
+        test_client = Client(api_key, api_secret)
+        logging.info("Validating futures trading symbols...")
+        
+        # Get futures exchange info
+        exchange_info = test_client.futures_exchange_info()
+        valid_futures_symbols = {s['symbol']: s for s in exchange_info['symbols'] if s['status'] == 'TRADING'}
+        
+        # Validate each configured symbol
+        valid_symbols = []
+        invalid_symbols = []
+        
+        for symbol in symbols:
+            if symbol in valid_futures_symbols:
+                symbol_info = valid_futures_symbols[symbol]
+                # Store symbol precision and filters for later use
+                valid_symbols.append({
+                    'symbol': symbol,
+                    'pricePrecision': symbol_info['pricePrecision'],
+                    'quantityPrecision': symbol_info['quantityPrecision'],
+                    'minQty': float(symbol_info['filters'][1]['minQty']),
+                    'maxQty': float(symbol_info['filters'][1]['maxQty']),
+                    'stepSize': float(symbol_info['filters'][1]['stepSize'])
+                })
+            else:
+                invalid_symbols.append(symbol)
+        
+        if invalid_symbols:
+            logging.error(f"Invalid futures symbols found: {', '.join(invalid_symbols)}")
+            return False, None
+        
+        logging.info(f"Successfully validated {len(valid_symbols)} symbols")
+        return True, valid_symbols
+        
+    except BinanceAPIException as e:
+        logging.error(f"Error validating futures symbols: {e}")
+        return False, None
+    except Exception as e:
+        logging.error(f"Unexpected error during symbol validation: {e}")
+        return False, None    
+def load_config():
+    try:
+        with open("config.json") as f:
+            config = json.load(f)
+            
+        # Validate symbol format
+        if not isinstance(config.get('symbols', []), list):
+            logging.error("'symbols' must be a list in config.json")
+            return None
+            
+        # Convert symbols to uppercase
+        config['symbols'] = [s.upper() for s in config['symbols']]
+        
+        # Validate symbol format
+        for symbol in config['symbols']:
+            if not symbol.endswith('USDT'):
+                logging.error(f"Invalid symbol format: {symbol}. Must end with USDT for futures trading")
+                return None
+                
+        return config
+        
+    except FileNotFoundError:
+        logging.error("config.json not found")
+        return None
+    except json.JSONDecodeError:
+        logging.error("Invalid JSON in config.json")
+        return None
+    except Exception as e:
+        logging.error(f"Error loading config: {e}")
+        return None  
+def monitor_symbol_status():
+    try:
+        test_client = Client(api_key, api_secret)
+        
+        # Get current futures prices
+        prices = test_client.futures_symbol_ticker()
+        price_dict = {p['symbol']: float(p['price']) for p in prices}
+        
+        # Get 24h stats
+        stats = test_client.futures_ticker()
+        stats_dict = {s['symbol']: s for s in stats}
+        
+        logging.info("\nSymbol Status Report:")
+        for symbol in symbols:
+            if symbol in price_dict:
+                stat = stats_dict.get(symbol, {})
+                logging.info(f"{symbol}:")
+                logging.info(f"  Price: {price_dict[symbol]}")
+                logging.info(f"  24h Volume: {stat.get('volume', 'N/A')}")
+                logging.info(f"  24h Change: {stat.get('priceChangePercent', 'N/A')}%")
+            else:
+                logging.warning(f"{symbol}: Not available for trading")
+                
+    except Exception as e:
+        logging.error(f"Error monitoring symbols: {e}")   
+def update_available_symbols():
+    try:
+        client = Client(api_key, api_secret)
+        exchange_info = client.futures_exchange_info()
+        available_symbols = [s['symbol'] for s in exchange_info['symbols'] if s['status'] == 'TRADING']
+        
+        # Filter configured symbols
+        valid_symbols = [s for s in symbols if s in available_symbols]
+        
+        if len(valid_symbols) != len(symbols):
+            removed_symbols = set(symbols) - set(valid_symbols)
+            logging.warning(f"Some symbols are no longer available: {', '.join(removed_symbols)}")
+            
+        return valid_symbols
+    except Exception as e:
+        logging.error(f"Error updating available symbols: {e}")
+        return []
+
+def monitor_trading_status():
+    while True:
+        try:
+            valid_symbols = update_available_symbols()
+            if not valid_symbols:
+                logging.error("No valid symbols available for trading")
+                continue
+                
+            # Get current prices and 24h stats
+            prices = client.futures_symbol_ticker()
+            price_dict = {p['symbol']: float(p['price']) for p in prices}
+            
+            # Log active symbols status
+            for symbol in valid_symbols:
+                if symbol in price_dict:
+                    logging.info(f"{symbol}: {price_dict[symbol]}")
+                    
+            time.sleep(300)  # Check every 5 minutes
+            
+        except Exception as e:
+            logging.error(f"Error monitoring trading status: {e}")
+            time.sleep(60)        
+         
 # Ana işlev
 def main():
+    
     while True:
         try:
             for symbol in symbols:
@@ -513,14 +948,32 @@ def main():
             
 if __name__ == "__main__":
     try:
-        # Binance futures bağlantısını test et
-        client.futures_account_balance()
+        logging.info("Starting trading bot...")
         
-        # Telegram bağlantısını test et
-        asyncio.run(send_telegram_message("Bot started successfully!"))
+        # Load and validate config
+        config = load_config()
+        if config is None:
+            logging.error("Failed to load configuration. Please check config.json")
+            sys.exit(1)
+            
+        # Update global variables from config
+        api_key = config['api_key']
+        api_secret = config['api_secret']
+        symbols = config['symbols']
+        leverage = config['leverage']
         
-        # Ana döngüyü başlat
+        # Initialize Binance client
+        client = initialize_binance_client()
+        if client is None:
+            sys.exit(1)
+            
+        # Start main trading loop
         main()
         
+    except KeyboardInterrupt:
+        logging.info("Bot stopped by user")
+        sys.exit(0)
     except Exception as e:
-        logging.error(f"Startup error: {str(e)}")
+        logging.error(f"Critical error: {e}")
+        sys.exit(1)
+        
