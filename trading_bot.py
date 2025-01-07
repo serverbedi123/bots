@@ -531,71 +531,98 @@ def initialize_binance_client():
     try:
         logging.info("Initializing Binance client...")
         
-        # Validate symbols first
-        is_valid, valid_symbols = validate_futures_symbols()
-        if not is_valid:
+        # 1. İlk olarak API izinlerini kontrol et
+        if not verify_api_permissions():
+            logging.error("API permissions verification failed")
             return None
             
-        # Initialize client
-        client = Client(api_key, api_secret, testnet=True)  # Using testnet as specified in config
+        # 2. Test client'ı oluştur
+        test_client = Client(api_key, api_secret, testnet=True)
+        logging.info("✓ Test client created successfully")
         
-        # Configure futures settings for each valid symbol
-        for symbol_info in valid_symbols:
-            symbol = symbol_info['symbol']
+        # 3. Futures API'sini test et
+        # Futures dinleme anahtarı oluştur
+        listen_key = test_client.futures_create_listen_key()
+        logging.info("✓ Futures listen key created")
+        
+        # Pozisyon modunu kontrol et
+        try:
+            test_client.futures_change_position_mode(dualSidePosition=False)
+            logging.info("✓ Position mode set to one-way")
+        except BinanceAPIException as e:
+            if e.code != -4059:  # Zaten one-way modda ise
+                raise e
+            logging.info("✓ Already in one-way position mode")
+            
+        # 4. Önce tek bir sembol ile test et
+        test_symbol = "BTCUSDT"
+        try:
+            # Marjin tipini ayarla
+            test_client.futures_change_margin_type(symbol=test_symbol, marginType='ISOLATED')
+            logging.info(f"✓ Set {test_symbol} to ISOLATED margin")
+        except BinanceAPIException as e:
+            if e.code != -4046:  # Zaten ISOLATED ise
+                logging.error(f"Error setting margin type: {e}")
+                return None
+            logging.info(f"✓ {test_symbol} already in ISOLATED margin")
+            
+        # Kaldıracı ayarla
+        try:
+            test_client.futures_change_leverage(symbol=test_symbol, leverage=leverage)
+            logging.info(f"✓ Set {test_symbol} leverage to {leverage}x")
+        except BinanceAPIException as e:
+            logging.error(f"Error setting leverage: {e}")
+            if e.code == -2015:
+                logging.error("\nTo fix this issue:")
+                logging.error("1. Go to Binance Futures")
+                logging.error("2. Enable Futures trading if not already enabled")
+                logging.error("3. Create a new API key with these permissions:")
+                logging.error("   - Enable Futures Trading")
+                logging.error("   - Enable Spot & Margin Trading")
+                logging.error("4. Disable IP restrictions temporarily")
+            return None
+            
+        # 5. Ana client'ı oluştur
+        client = Client(api_key, api_secret, testnet=True)
+        logging.info("✓ Main client initialized successfully")
+        
+        # 6. Tüm sembolleri yapılandır
+        for symbol in symbols:
             try:
-                # Set margin type to ISOLATED
+                # Her sembol için marjin tipini ayarla
                 try:
                     client.futures_change_margin_type(symbol=symbol, marginType='ISOLATED')
-                    logging.info(f"Set {symbol} to ISOLATED margin")
                 except BinanceAPIException as e:
-                    if e.code != -4046:  # Already ISOLATED
-                        raise e
+                    if e.code != -4046:  # Zaten ISOLATED değilse
+                        logging.warning(f"Could not set margin type for {symbol}: {e}")
+                        continue
                 
-                # Set leverage
+                # Her sembol için kaldıracı ayarla
                 client.futures_change_leverage(symbol=symbol, leverage=leverage)
-                logging.info(f"Set {symbol} leverage to {leverage}x")
+                logging.info(f"✓ Configured {symbol}: ISOLATED margin, {leverage}x leverage")
                 
             except BinanceAPIException as e:
-                logging.error(f"Error configuring {symbol}: {e}")
-                return None
+                logging.warning(f"Could not configure {symbol}: {e}")
+                continue
+                
+            # Semboller arası kısa bekleme
+            time.sleep(0.1)
         
-        logging.info("Binance Futures client initialized successfully")
         return client
         
-    except Exception as e:
+    except BinanceAPIException as e:
         logging.error(f"Error initializing Binance client: {e}")
+        if e.code == -2015:
+            logging.error("\nAPI Permission Error. Please check:")
+            logging.error("1. Futures trading is enabled on your account")
+            logging.error("2. API key has correct permissions")
+            logging.error("3. IP restrictions are disabled")
+            logging.error("4. You have sufficient funds in Futures wallet")
         return None
-    
-
-def diagnose_api_setup():
-    logging.info("Running API setup diagnostics...")
-    
-    try:
-        # Test with spot API first (more permissive)
-        test_client = Client(api_key, api_secret)
         
-        # Try basic endpoints
-        try:
-            test_client.get_system_status()
-            logging.info("✓ Basic API connectivity working")
-        except BinanceAPIException as e:
-            logging.error(f"✗ Basic connectivity failed: {e}")
-            return False
-
-        # Test futures specific endpoints
-        try:
-            test_client.futures_ping()
-            logging.info("✓ Futures API connectivity working")
-        except BinanceAPIException as e:
-            logging.error(f"✗ Futures connectivity failed: {e}")
-            return False
-
-        return True
-
     except Exception as e:
-        logging.error(f"Diagnostic failed: {e}")
-        return False
-    
+        logging.error(f"Unexpected error: {str(e)}")
+        return None
 
 def verify_futures_account():
     try:
@@ -700,6 +727,9 @@ def validate_trading_symbols():
     except BinanceAPIException as e:
         logging.error(f"Error validating symbols: {e}")
         return False  
+    
+
+    
     
 def validate_futures_symbols():
     try:
@@ -836,8 +866,57 @@ def monitor_trading_status():
             
         except Exception as e:
             logging.error(f"Error monitoring trading status: {e}")
-            time.sleep(60)        
-         
+            time.sleep(60)    
+
+def validate_api_key():
+    logging.info("Validating API key configuration...")
+    try:
+        test_client = Client(api_key, api_secret, testnet=True)
+        
+        # Test basic connectivity
+        test_client.ping()
+        logging.info("✓ Basic connectivity test passed")
+        
+        # Get API key permissions
+        account = test_client.get_account()
+        
+        # Check permissions
+        permissions = account.get('permissions', [])
+        logging.info(f"API Key permissions: {permissions}")
+        
+        # Required permissions
+        required = ['SPOT', 'FUTURES']
+        missing = [p for p in required if p not in permissions]
+        
+        if missing:
+            logging.error(f"Missing required permissions: {', '.join(missing)}")
+            logging.error("\nTo fix this:")
+            logging.error("1. Go to Binance.com")
+            logging.error("2. Navigate to API Management")
+            logging.error("3. Delete your current API key")
+            logging.error("4. Create a new API key with these permissions:")
+            logging.error("   - Enable Reading")
+            logging.error("   - Enable Spot & Margin Trading")
+            logging.error("   - Enable Futures")
+            logging.error("   - Enable Universal Transfer")
+            logging.error("5. Temporarily disable IP restriction")
+            return False
+            
+        logging.info("✓ API key permissions validated")
+        return True
+        
+    except BinanceAPIException as e:
+        logging.error(f"API validation failed: {e}")
+        if e.code == -2015:
+            logging.error("\nTo fix Invalid API-key error:")
+            logging.error("1. Create a new API key on Binance.com")
+            logging.error("2. Enable ALL permissions for futures trading")
+            logging.error("3. Disable IP restrictions temporarily")
+            logging.error("4. Update config.json with new API credentials")
+        return False
+    except Exception as e:
+        logging.error(f"Unexpected error during API validation: {e}")
+        return False         
 # Ana işlev
 def main():
     
