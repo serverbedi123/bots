@@ -224,27 +224,45 @@ class BinanceFuturesBot:
             return None
 
     def generate_ml_signals(self, df: pd.DataFrame) -> dict:
-        """ML sinyalleri üret"""
         try:
-            features = df.iloc[-1][['open', 'high', 'low', 'close', 'volume']].values.reshape(1, -1)
+            # Özellik isimlerini belirterek DataFrame oluştur
+            feature_names = ['open', 'high', 'low', 'close', 'volume']
+            features = df[feature_names].iloc[-1].to_frame().T
+            
+            # Ölçeklendirme işlemi
             scaled_features = self.scaler.transform(features)
+            
+            # Tahmin
             prediction = self.model.predict(scaled_features)
             probability = self.model.predict_proba(scaled_features)[0][prediction[0]]
-            return {'type': 'BUY' if prediction[0] == 1 else 'SELL', 'probability': probability}
+            
+            return {
+                'type': 'BUY' if prediction[0] == 1 else 'SELL',
+                'probability': probability
+            }
         except Exception as e:
             logging.error(f"ML sinyal üretim hatası: {e}")
             return {'type': 'NONE', 'probability': 0.0}
 
     def generate_signals(self, df: pd.DataFrame) -> dict:
-        """Teknik sinyalleri üret"""
         try:
             last_row = df.iloc[-1]
-            if last_row['RSI'] > 70 and last_row['MACD'] < last_row['MACD_SIGNAL']:
-                return {'type': 'SELL'}
-            elif last_row['RSI'] < 30 and last_row['MACD'] > last_row['MACD_SIGNAL']:
-                return {'type': 'BUY'}
-            else:
-                return {'type': 'HOLD'}
+            
+            # RSI sinyalleri
+            rsi_signal = 'SELL' if last_row['RSI'] > 70 else 'BUY' if last_row['RSI'] < 30 else 'HOLD'
+            
+            # MACD sinyalleri
+            macd_signal = 'BUY' if last_row['MACD'] > last_row['MACD_SIGNAL'] else 'SELL'
+            
+            # Bollinger Bands sinyalleri
+            bb_signal = 'BUY' if last_row['close'] < last_row['BB_LOWER'] else 'SELL' if last_row['close'] > last_row['BB_UPPER'] else 'HOLD'
+            
+            # Sinyal kombinasyonu
+            if rsi_signal == macd_signal and bb_signal != 'HOLD':
+                return {'type': rsi_signal}
+            
+            return {'type': 'HOLD'}
+            
         except Exception as e:
             logging.error(f"Teknik sinyal üretim hatası: {e}")
             return {'type': 'NONE'}
