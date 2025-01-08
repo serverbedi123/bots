@@ -460,6 +460,13 @@ class BinanceFuturesBot:
             # Pozisyon büyüklüğünü hesapla
             risk_percentage = 0.95  # Bakiyenin %95'i
             position_value = balance * risk_percentage
+        
+            # Minimum işlem değeri kontrolü (5 USDT)
+            min_notional = 5.1
+            if position_value < min_notional:
+                position_value = min_notional
+                logging.info(f"Position value minimum notional için ayarlandı: {position_value} USDT")
+            
             quantity = position_value / current_price
 
             # Sembol bilgilerini al
@@ -468,7 +475,14 @@ class BinanceFuturesBot:
                 quantity = self.round_to_precision(quantity, symbol_info['quantityPrecision'])
                 price = self.round_to_precision(current_price, symbol_info['pricePrecision'])
         
-            logging.info(f"Hesaplanan işlem miktarı: {quantity}")
+            # İşlem değeri kontrolü
+            notional_value = quantity * price
+            if notional_value < min_notional:
+                logging.warning(f"İşlem değeri çok düşük: {notional_value} < {min_notional} USDT")
+                await self.send_telegram(f"⚠️ İşlem değeri çok düşük: {symbol} - {notional_value} USDT")
+                return False
+            
+            logging.info(f"Hesaplanan işlem miktarı: {quantity} ({notional_value} USDT)")
 
             # Market emri oluştur
             try:
@@ -479,7 +493,7 @@ class BinanceFuturesBot:
                     quantity=quantity
                 )
 
-                #    Stop Loss ve Take Profit hesapla
+                # Stop Loss ve Take Profit hesapla
                 sl_price = price * (0.98 if trade_side == 'BUY' else 1.02)
                 tp_price = price * (1.03 if trade_side == 'BUY' else 0.97)
 
@@ -508,6 +522,7 @@ class BinanceFuturesBot:
                     f"Yön: {trade_side}\n"
                     f"Miktar: {quantity}\n"
                     f"Fiyat: {price}\n"
+                    f"İşlem Değeri: {notional_value:.2f} USDT\n"
                     f"Stop Loss: {sl_price}\n"
                     f"Take Profit: {tp_price}\n"
                     f"Kaldıraç: 5x"
@@ -527,7 +542,7 @@ class BinanceFuturesBot:
             logging.error(f"İşlem yönetimi hatası: {e}")
             await self.send_telegram(f"⚠️ İşlem Yönetimi Hatası: {symbol} - {str(e)}")
             return False
-
+    
     def get_account_balance(self) -> float:
         """Hesap bakiyesini al"""
         try:
@@ -587,11 +602,12 @@ class BinanceFuturesBot:
                             # Sinyalleri doğrula
                             if self._validate_signals(ml_signal, technical_signal):
                                 current_price = float(df['close'].iloc[-1])
+                                logging.info(f"Sinyal onaylandı: {ml_signal['type']} (Güç: {technical_signal['strength']}, ML Olasılık: {ml_signal['probability']})")
                                 await self.execute_trade_with_risk_management(
                                 symbol=symbol,
-                                signal_type=ml_signal,  # ml_signal bir dict olmalı
+                                signal_type=ml_signal['type'],  # Sadece 'BUY' veya 'SELL' string'ini geç
                                 current_price=current_price
-                                )
+                            )
 
                             # Rate limit kontrolü
                             await asyncio.sleep(self.rate_limit_delay)
