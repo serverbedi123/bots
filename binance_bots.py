@@ -352,9 +352,24 @@ class BinanceFuturesBot:
     def _validate_signals(self, ml_signal: dict, technical_signal: dict) -> bool:
         """Sinyalleri doğrula"""
         try:
-            if ml_signal['type'] == technical_signal['type'] and ml_signal['type'] != 'NONE':
-                return True
+            logging.info(f"ML Sinyal: {ml_signal}")
+            logging.info(f"Teknik Sinyal: {technical_signal}")
+        
+            # Sinyal eşleşmesi için daha esnek kurallar
+            if technical_signal['type'] in ['BUY', 'SELL']:
+                signal_strength = technical_signal.get('strength', 0)
+            
+                # Her iki sinyal de aynı yönde ve güç yeterli ise
+                if (ml_signal['type'] == technical_signal['type'] and 
+                    signal_strength > 0.3 and 
+                    ml_signal['probability'] > 0.6):
+                
+                    logging.info(f"Sinyal onaylandı: {technical_signal['type']} "
+                            f"(Güç: {signal_strength}, ML Olasılık: {ml_signal['probability']})")
+                    return True
+                
             return False
+        
         except Exception as e:
             logging.error(f"Sinyal doğrulama hatası: {e}")
             return False
@@ -371,10 +386,33 @@ class BinanceFuturesBot:
             
         return True
 
-    def _calculate_position_size(self, balance: float, risk_per_trade: float) -> float:
+    def calculate_position_size(self, symbol: str, current_price: float) -> float:
         """Pozisyon büyüklüğünü hesapla"""
-        return balance * risk_per_trade * self.config['max_position_size']
-
+        try:
+            # Bakiyeyi al
+            balance = float(self.get_account_balance())
+            logging.info(f"Mevcut bakiye: {balance} USDT")
+        
+            # Minimum işlem miktarı (örnek: 0.001 BTC için yaklaşık 0.05 USDT)
+            min_trade_value = 0.05
+        
+            # Risk miktarını hesapla (bakiyenin %95'i)
+            risk_amount = balance * 0.95
+        
+            # Pozisyon büyüklüğünü hesapla
+            position_size = risk_amount / current_price
+        
+            # Minimum işlem değeri kontrolü
+            if position_size * current_price < min_trade_value:
+                logging.warning(f"İşlem değeri çok düşük: {position_size * current_price} USDT")
+                return 0
+            
+            return position_size
+        
+        except Exception as e:
+            logging.error(f"Pozisyon büyüklüğü hesaplama hatası: {e}")
+            return 0
+        
     def get_symbol_info(self, symbol: str):
         """Sembol bilgilerini al"""
         try:
@@ -399,58 +437,54 @@ class BinanceFuturesBot:
     async def execute_trade_with_risk_management(self, symbol: str, signal_type: str, current_price: float):
         """İşlem yönetimi ve risk kontrolü"""
         try:
-            # Sembol bilgilerini al
-            symbol_info = self.get_symbol_info(symbol)  # await kaldırıldı
-            if not symbol_info:
-                logging.error(f"Sembol bilgisi alınamadı: {symbol}")
-                return False
-
+            # Minimum işlem büyüklüğünü düşür
+            await self.client.change_leverage(symbol=symbol, leverage=5)
+            min_quantity = 0.001  # Veya sembolün izin verdiği minimum miktar
+        
             # Hesap bakiyesini al
-            balance = self.get_account_balance()  # Eğer async değilse await kaldırıldı
+            balance = self.get_account_balance()
+            logging.info(f"Mevcut bakiye: {balance} USDT")
         
-            # Risk hesaplama (örnek: bakiyenin %1'i)
-            risk_amount = balance * self.config.get('risk_percentage', 0.01)
+            # Risk miktarını düşür
+            risk_percentage = 0.95  # Bakiyenin %95'ini kullan
+            quantity = (balance * risk_percentage) / current_price
         
-            # Pozisyon büyüklüğünü hesapla ve yuvarla
-            quantity = risk_amount / current_price
-            quantity = self.round_to_precision(quantity, symbol_info['quantityPrecision'])
-        
-            # İşlem fiyatını yuvarla
-            price = self.round_to_precision(current_price, symbol_info['pricePrecision'])
-
-            try:
-                if signal_type == 'BUY':
-                    order = self.client.new_order(
-                        symbol=symbol,
-                        side='BUY',
-                        type='MARKET',
-                        quantity=quantity
-                    )
-                    logging.info(f"Long pozisyon açıldı: {symbol}, Miktar: {quantity}")
-                    await self.send_telegram(f"🟢 Long Pozisyon Açıldı\nSymbol: {symbol}\nMiktar: {quantity}\nFiyat: {price}")
-                
-                elif signal_type == 'SELL':
-                    order = self.client.new_order(
-                        symbol=symbol,
-                        side='SELL',
-                        type='MARKET',
-                        quantity=quantity
-                    )
-                    logging.info(f"Short pozisyon açıldı: {symbol}, Miktar: {quantity}")
-                    await self.send_telegram(f"🔴 Short Pozisyon Açıldı\nSymbol: {symbol}\nMiktar: {quantity}\nFiyat: {price}")
-                
-                return True
+            # Sembol bilgilerini al
+            symbol_info = self.get_symbol_info(symbol)
+            if symbol_info:
+                quantity = self.round_to_precision(quantity, symbol_info['quantityPrecision'])
+                logging.info(f"Hesaplanan işlem miktarı: {quantity}")
             
-            except Exception as order_error:
-                logging.error(f"Order yerleştirme hatası: {order_error}")
-                await self.send_telegram(f"⚠️ İşlem Hatası: {symbol} - {str(order_error)}")
-                return False
-            
+                if quantity >= min_quantity:
+                    try:
+                        order = self.client.new_order(
+                            symbol=symbol,
+                            side=signal_type,
+                            type='MARKET',
+                            quantity=quantity
+                        )
+                    
+                        logging.info(f"İşlem gerçekleşti: {symbol}, Tip: {signal_type}, Miktar: {quantity}")
+                        await self.send_telegram(
+                            f"🎯 İşlem Gerçekleşti\n"
+                            f"Sembol: {symbol}\n"
+                            f"Yön: {signal_type}\n"
+                            f"Miktar: {quantity}\n"
+                            f"Fiyat: {current_price}"
+                        )
+                        return True
+                    
+                    except Exception as order_error:
+                        logging.error(f"Order hatası: {order_error}")
+                        await self.send_telegram(f"⚠️ İşlem Hatası: {str(order_error)}")
+                else:
+                    logging.warning(f"İşlem miktarı çok düşük: {quantity} < {min_quantity}")
+                
         except Exception as e:
             logging.error(f"İşlem yönetimi hatası: {e}")
-            await self.send_telegram(f"⚠️ İşlem Yönetimi Hatası: {symbol} - {str(e)}")
-            return False
-        
+            await self.send_telegram(f"⚠️ Hata: {str(e)}")
+    
+        return False
 
 
     def get_account_balance(self):
