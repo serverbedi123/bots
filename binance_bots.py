@@ -436,13 +436,12 @@ class BinanceFuturesBot:
         factor = 10 ** precision
         return float(round(value * factor) / factor)
 
-    async def execute_trade_with_risk_management(self, symbol: str, signal_type: dict, current_price: float):
+    async def execute_trade_with_risk_management(self, symbol: str, signal_type: str, current_price: float):
         """İşlem yönetimi ve risk kontrolü"""
         try:
-            # Signal type'ı düzelt
-            trade_side = signal_type['type']  # 'BUY' veya 'SELL' değerini al
+            trade_side = signal_type
         
-            # Kaldıraç ayarı (sync)
+            # Kaldıraç ayarı
             try:
                 self.client.change_leverage(
                     symbol=symbol,
@@ -457,32 +456,36 @@ class BinanceFuturesBot:
             balance = float(self.get_account_balance())
             logging.info(f"Mevcut bakiye: {balance} USDT")
 
-            # Pozisyon büyüklüğünü hesapla
-            risk_percentage = 0.95  # Bakiyenin %95'i
-            position_value = balance * risk_percentage
-        
-            # Minimum işlem değeri kontrolü (5 USDT)
-            min_notional = 5.1
-            if position_value < min_notional:
-                position_value = min_notional
-                logging.info(f"Position value minimum notional için ayarlandı: {position_value} USDT")
-            
-            quantity = position_value / current_price
-
             # Sembol bilgilerini al
             symbol_info = self.get_symbol_info(symbol)
-            if symbol_info:
-                quantity = self.round_to_precision(quantity, symbol_info['quantityPrecision'])
-                price = self.round_to_precision(current_price, symbol_info['pricePrecision'])
-        
-            # İşlem değeri kontrolü
-            notional_value = quantity * price
-            if notional_value < min_notional:
-                logging.warning(f"İşlem değeri çok düşük: {notional_value} < {min_notional} USDT")
-                await self.send_telegram(f"⚠️ İşlem değeri çok düşük: {symbol} - {notional_value} USDT")
+            if not symbol_info:
+                logging.error(f"Sembol bilgisi alınamadı: {symbol}")
                 return False
-            
-            logging.info(f"Hesaplanan işlem miktarı: {quantity} ({notional_value} USDT)")
+
+            # Minimum işlem değeri (5.1 USDT) için quantity hesaplama
+            min_notional = 5.2  # Biraz daha yüksek tutalım
+            min_quantity = min_notional / current_price
+        
+            # Risk bazlı quantity hesaplama
+            risk_percentage = 0.95
+            risk_based_quantity = (balance * risk_percentage) / current_price
+        
+            # İkisinden büyük olanı seç
+            quantity = max(min_quantity, risk_based_quantity)
+        
+            # Quantity'yi sembol hassasiyetine yuvarla
+            quantity = self.round_to_precision(quantity, symbol_info['quantityPrecision'])
+            price = self.round_to_precision(current_price, symbol_info['pricePrecision'])
+        
+                # Son kontrol
+            final_notional = quantity * price
+            logging.info(f"Final işlem değeri: {final_notional} USDT")
+        
+            if final_notional < min_notional:
+                # Quantity'yi tekrar ayarla
+                quantity = self.round_to_precision((min_notional / price) * 1.01, symbol_info['quantityPrecision'])
+                final_notional = quantity * price
+                logging.info(f"Quantity yeniden ayarlandı: {quantity} ({final_notional} USDT)")
 
             # Market emri oluştur
             try:
@@ -515,17 +518,17 @@ class BinanceFuturesBot:
                     closePosition='true'
                 )
 
-                # İşlem başarılı mesajı
                 message = (
                     f"🎯 İşlem Gerçekleşti\n"
                     f"Sembol: {symbol}\n"
                     f"Yön: {trade_side}\n"
                     f"Miktar: {quantity}\n"
                     f"Fiyat: {price}\n"
-                    f"İşlem Değeri: {notional_value:.2f} USDT\n"
+                    f"İşlem Değeri: {final_notional:.2f} USDT\n"
                     f"Stop Loss: {sl_price}\n"
                     f"Take Profit: {tp_price}\n"
-                    f"Kaldıraç: 5x"
+                    f"Kaldıraç: 5x\n"
+                    f"Bakiye: {balance} USDT"
                 )
             
                 logging.info(f"İşlem başarılı: {symbol} {trade_side} {quantity}")
@@ -538,6 +541,10 @@ class BinanceFuturesBot:
                 await self.send_telegram(f"⚠️ İşlem Hatası: {symbol} - {str(order_error)}")
                 return False
 
+        except Exception as e:
+            logging.error(f"İşlem yönetimi hatası: {e}")
+            await self.send_telegram(f"⚠️ İşlem Yönetimi Hatası: {symbol} - {str(e)}")
+            return False
         except Exception as e:
             logging.error(f"İşlem yönetimi hatası: {e}")
             await self.send_telegram(f"⚠️ İşlem Yönetimi Hatası: {symbol} - {str(e)}")
@@ -575,7 +582,7 @@ class BinanceFuturesBot:
         try:
             logging.info(f"Bot started by {self.config.get('created_by', 'unknown')}")
             await self.send_telegram("🚀 Trading Bot Activated")
-        
+    
             while True:
                 try:
                     # Trading saatleri kontrolü
@@ -587,7 +594,7 @@ class BinanceFuturesBot:
                                 logging.warning(f"No data received for {symbol}")
                                 continue
 
-                            # Temel göstergeleri hesapla
+                                # Temel göstergeleri hesapla
                             df = self.calculate_indicators(df)
                             logging.info(f"Basic indicators calculated for {symbol}")
 
@@ -595,7 +602,7 @@ class BinanceFuturesBot:
                             df = self.calculate_advanced_indicators(df)
                             logging.info(f"Advanced indicators calculated for {symbol}")
 
-                         # ML ve teknik sinyalleri üret
+                            # ML ve teknik sinyalleri üret
                             ml_signal = self.generate_ml_signals(df)
                             technical_signal = self.generate_signals(df)
 
@@ -603,11 +610,13 @@ class BinanceFuturesBot:
                             if self._validate_signals(ml_signal, technical_signal):
                                 current_price = float(df['close'].iloc[-1])
                                 logging.info(f"Sinyal onaylandı: {ml_signal['type']} (Güç: {technical_signal['strength']}, ML Olasılık: {ml_signal['probability']})")
+                            
+                                # Burada signal_type olarak sadece string gönderiyoruz
                                 await self.execute_trade_with_risk_management(
-                                symbol=symbol,
-                                signal_type=ml_signal['type'],  # Sadece 'BUY' veya 'SELL' string'ini geç
-                                current_price=current_price
-                            )
+                                    symbol=symbol,
+                                    signal_type=ml_signal['type'],  # Sadece 'BUY' veya 'SELL' string'i
+                                    current_price=current_price
+                                )
 
                             # Rate limit kontrolü
                             await asyncio.sleep(self.rate_limit_delay)
@@ -622,7 +631,7 @@ class BinanceFuturesBot:
                 except Exception as loop_error:
                     logging.error(f"Loop iteration error: {loop_error}")
                     await self.send_telegram(f"⚠️ Error in main loop: {loop_error}")
-                    await asyncio.sleep(60)  # Hata durumunda 1 dakika bekle
+                    await asyncio.sleep(60)
 
         except Exception as e:
             logging.error(f"Critical error in run method: {e}")
