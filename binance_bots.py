@@ -10,7 +10,7 @@ import pandas_ta as ta
 from binance.um_futures import UMFutures
 from binance.error import ClientError
 from telegram import Bot
-from sklearn.ensemble import GradientBoostingClassifier
+from lightgbm import LGBMClassifier
 from sklearn.preprocessing import StandardScaler
 import joblib
 
@@ -26,13 +26,14 @@ class BinanceFuturesBot:
         self.positions = {}
         self.last_api_call = 0
         self.rate_limit_delay = 0.1
-        self.model = self._load_ml_model()
-        self.scaler = self._load_scaler()
+        self.model = self._initialize_model()
+        self.scaler = StandardScaler()
         self.daily_trades = 0
         self.daily_stats = {
             'trades': 0,
             'profit': 0.0,
-            'losses': 0.0
+            'losses': 0.0,
+            'win_rate': 0.0
         }
         self.last_daily_reset = datetime.now().date()
 
@@ -51,11 +52,16 @@ class BinanceFuturesBot:
         """Config dosyasını doğrula"""
         required_fields = [
             'api_key', 'api_secret', 'telegram_token', 'telegram_chat_id',
-            'symbols', 'risk_management', 'trading_hours', 'timeframes'
+            'symbols', 'risk_management', 'trading_hours', 'timeframes',
+            'notifications', 'check_interval'
         ]
         for field in required_fields:
             if field not in config:
                 raise ValueError(f"Eksik config alanı: {field}")
+
+    def _initialize_model(self) -> LGBMClassifier:
+        """Initialize LightGBM Model"""
+        return LGBMClassifier(n_estimators=200, learning_rate=0.05, max_depth=6, random_state=42)
 
     async def send_telegram(self, message: str) -> None:
         """Telegram mesajı gönder"""
@@ -77,19 +83,19 @@ class BinanceFuturesBot:
                 interval=timeframe,
                 limit=100
             )
-            
+
             df = pd.DataFrame(klines, columns=[
                 'timestamp', 'open', 'high', 'low', 'close', 'volume',
                 'close_time', 'quote_volume', 'trades_count', 'taker_buy_base',
                 'taker_buy_quote', 'ignore'
             ])
-            
+
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 df[col] = df[col].astype(float)
-            
+
             return df
-            
+
         except Exception as e:
             logging.error(f"Kline veri alma hatası: {e}")
             return pd.DataFrame()
@@ -97,45 +103,54 @@ class BinanceFuturesBot:
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Temel teknik indikatörleri hesapla"""
         try:
-            # Moving Averages
             df['SMA_20'] = ta.sma(df['close'], length=20)
             df['EMA_20'] = ta.ema(df['close'], length=20)
-            
-            # Bollinger Bands
             bb = ta.bbands(df['close'], length=20)
             df['BB_UPPER'] = bb['BBU_20_2.0']
             df['BB_MIDDLE'] = bb['BBM_20_2.0']
             df['BB_LOWER'] = bb['BBL_20_2.0']
-            
-            # RSI
             df['RSI'] = ta.rsi(df['close'], length=14)
-            
-            # MACD
             macd = ta.macd(df['close'])
             df['MACD'] = macd['MACD_12_26_9']
             df['MACD_SIGNAL'] = macd['MACDs_12_26_9']
-            
+            df['ADX'] = ta.adx(df['high'], df['low'], df['close'], length=14)
+            df['STOCH'] = ta.stoch(df['high'], df['low'], df['close'])['STOCHk_14_3_3']
+            df['ICHIMOKU'] = ta.ichimoku(df['high'], df['low'])['ITS_9']
+
             return df
-            
+
         except Exception as e:
             logging.error(f"İndikatör hesaplama hatası: {e}")
             return df
 
-    def is_trading_allowed(self) -> bool:
-        """Trading koşullarını kontrol et"""
-        current_hour = datetime.now().hour
-        if not (self.config['trading_hours']['start_hour'] <= 
-                current_hour < self.config['trading_hours']['end_hour']):
-            return False
-            
-        if self.daily_trades >= self.config['risk_management']['max_trades_per_day']:
-            return False
-            
-        return True
+    def train_model(self, df: pd.DataFrame) -> None:
+        """Train the ML model with new data."""
+        try:
+            features = ['SMA_20', 'EMA_20', 'RSI', 'MACD', 'BB_UPPER', 'BB_LOWER', 'ADX', 'STOCH', 'ICHIMOKU']
+            X = df[features].dropna()
+            y = (df['close'].shift(-1) > df['close']).astype(int).dropna()
 
-    def _calculate_position_size(self, balance: float, risk_per_trade: float) -> float:
-        """Pozisyon büyüklüğünü hesapla"""
-        return balance * risk_per_trade * self.config['max_position_size']
+            X_scaled = self.scaler.fit_transform(X)
+            self.model.fit(X_scaled, y)
+        except Exception as e:
+            logging.error(f"Model eğitim hatası: {e}")
+
+    def generate_ml_signals(self, df: pd.DataFrame) -> dict:
+        """Generate signals based on ML model."""
+        try:
+            features = ['SMA_20', 'EMA_20', 'RSI', 'MACD', 'BB_UPPER', 'BB_LOWER', 'ADX', 'STOCH', 'ICHIMOKU']
+            X = df[features].iloc[-1:].dropna()
+            X_scaled = self.scaler.transform(X)
+
+            probabilities = self.model.predict_proba(X_scaled)[0]
+            signal_type = 'BUY' if probabilities[1] > 0.6 else 'SELL'
+            return {
+                'type': signal_type,
+                'probability': probabilities[1] if signal_type == 'BUY' else probabilities[0]
+            }
+        except Exception as e:
+            logging.error(f"ML sinyal üretim hatası: {e}")
+            return {}
 
     async def execute_trade_with_risk_management(self, symbol: str, signal: dict, price: float):
         """Gelişmiş risk yönetimi ile trade gerçekleştirme"""
@@ -147,7 +162,6 @@ class BinanceFuturesBot:
             if signal['type'] not in ['BUY', 'SELL']:
                 return
 
-            # Risk hesaplaması
             account = self.client.account()
             balance = float(account['totalWalletBalance'])
             position_size = self._calculate_position_size(
@@ -155,18 +169,10 @@ class BinanceFuturesBot:
                 self.config['risk_management']['max_loss_percentage'] / 100
             )
 
-            # Stop loss ve take profit
-            atr = self._calculate_atr(symbol)
-            stop_loss = self._calculate_dynamic_stop_loss(
-                price, atr, signal['type'],
-                self.config['risk_management']['stop_loss_multiplier']
-            )
-            take_profit = self._calculate_dynamic_take_profit(
-                price, atr, signal['type'],
-                self.config['risk_management']['take_profit_multiplier']
-            )
+            atr = ta.atr(self.get_klines(symbol)['high'], self.get_klines(symbol)['low'], self.get_klines(symbol)['close'])
+            stop_loss = price - atr[-1] * 2 if signal['type'] == 'BUY' else price + atr[-1] * 2
+            take_profit = price + atr[-1] * 4 if signal['type'] == 'BUY' else price - atr[-1] * 4
 
-            # Order'ları gönder
             order = await self._place_orders(
                 symbol, signal['type'], position_size, stop_loss, take_profit
             )
@@ -181,17 +187,44 @@ class BinanceFuturesBot:
             logging.error(f"Trade execution hatası: {e}")
             await self.send_telegram(f"Trade hatası: {e}")
 
-    async def _send_trade_notification(self, symbol, signal, price, size, sl, tp):
-        """Trade bildirimini gönder"""
+    def is_trading_allowed(self) -> bool:
+        """Check if trading is allowed based on trading hours"""
+        now = datetime.now().time()
+        start_time = time(*map(int, self.config['trading_hours']['start'].split(':')))
+        end_time = time(*map(int, self.config['trading_hours']['end'].split(':')))
+        return start_time <= now <= end_time
+
+    def _calculate_position_size(self, balance: float, risk: float) -> float:
+        """Calculate position size based on risk management"""
+        return balance * risk
+
+    async def _place_orders(self, symbol: str, order_type: str, position_size: float, stop_loss: float, take_profit: float) -> dict:
+        """Place orders with Binance API"""
+        try:
+            order = self.client.new_order(
+                symbol=symbol,
+                side='BUY' if order_type == 'BUY' else 'SELL',
+                type='LIMIT',
+                quantity=position_size,
+                price=stop_loss if order_type == 'BUY' else take_profit,
+                timeInForce='GTC'
+            )
+            return order
+        except ClientError as e:
+            logging.error(f"Order placement hatası: {e}")
+            return {}
+
+    async def _send_trade_notification(self, symbol: str, signal: dict, price: float, position_size: float, stop_loss: float, take_profit: float) -> None:
+        """Send trade notification via Telegram"""
         message = (
-            f"🤖 Trade Executed\n"
+            f"Trade Executed:\n"
             f"Symbol: {symbol}\n"
             f"Type: {signal['type']}\n"
-            f"Price: {price:.8f}\n"
-            f"Size: {size:.8f}\n"
-            f"Stop Loss: {sl:.8f}\n"
-            f"Take Profit: {tp:.8f}\n"
-            f"Probability: {signal['probability']:.2f}"
+            f"Price: {price}\n"
+            f"Position Size: {position_size}\n"
+            f"Stop Loss: {stop_loss}\n"
+            f"Take Profit: {take_profit}\n"
+            f"Probability: {signal['probability']}"
         )
         await self.send_telegram(message)
 
@@ -208,11 +241,11 @@ class BinanceFuturesBot:
                         if df.empty:
                             continue
 
-                        df = self.calculate_advanced_indicators(df)
+                        df = self.calculate_indicators(df)
+                        self.train_model(df)
                         ml_signal = self.generate_ml_signals(df)
-                        technical_signal = self.generate_signals(df)
 
-                        if self._validate_signals(ml_signal, technical_signal):
+                        if ml_signal:
                             current_price = float(df['close'].iloc[-1])
                             await self.execute_trade_with_risk_management(
                                 symbol, ml_signal, current_price
