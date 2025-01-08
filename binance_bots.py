@@ -116,47 +116,97 @@ class BinanceFuturesBot:
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Temel teknik indikatörleri hesapla"""
         try:
+            logging.info("Calculating basic technical indicators...")
+        
+            # RSI hesaplama
+            df['RSI'] = ta.rsi(df['close'], length=14)
+        
+            # MACD hesaplama
+            macd_data = ta.macd(df['close'])
+            df['MACD'] = macd_data['MACD_12_26_9']
+            df['MACD_SIGNAL'] = macd_data['MACDs_12_26_9']
+            df['MACD_HIST'] = macd_data['MACDh_12_26_9']
+        
+            # Bollinger Bands hesaplama
+            bollinger = ta.bbands(df['close'], length=20, std=2)
+            df['BB_UPPER'] = bollinger['BBU_20_2.0']
+            df['BB_MIDDLE'] = bollinger['BBM_20_2.0']
+            df['BB_LOWER'] = bollinger['BBL_20_2.0']
+        
             # Moving Averages
             df['SMA_20'] = ta.sma(df['close'], length=20)
             df['EMA_20'] = ta.ema(df['close'], length=20)
         
-            # Bollinger Bands
-            bb = ta.bbands(df['close'], length=20)
-            df['BB_UPPER'] = bb['BBU_20_2.0']
-            df['BB_MIDDLE'] = bb['BBM_20_2.0']
-            df['BB_LOWER'] = bb['BBL_20_2.0']
+            # NaN değerleri temizle
+            df = df.ffill().bfill()
         
-            # RSI
-            df['RSI'] = ta.rsi(df['close'], length=14)
+            # Hesaplanan göstergeleri kontrol et
+            required_indicators = ['RSI', 'MACD', 'MACD_SIGNAL', 'BB_UPPER', 'BB_LOWER']
+            missing_indicators = [ind for ind in required_indicators if ind not in df.columns]
         
-            # MACD
-            macd = ta.macd(df['close'])
-            df['MACD'] = macd['MACD_12_26_9']
-            df['MACD_SIGNAL'] = macd['MACDs_12_26_9']
-        
+            if missing_indicators:
+                logging.warning(f"Missing indicators after calculation: {missing_indicators}")
+            else:
+                logging.info("All required indicators calculated successfully")
+            
             return df
         
         except Exception as e:
-            logging.error(f"İndikatör hesaplama hatası: {e}")
-        return df
+            logging.error(f"İndikatör hesaplama hatası: {str(e)}")
+            return df
 
     def calculate_advanced_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """İleri seviye indikatörleri hesapla"""
         try:
-        # Ichimoku
-            ichimoku = ta.ichimoku(df['high'], df['low'], df['close'])
-            df['ICHIMOKU_BASE'] = ichimoku[0]
-            df['ICHIMOKU_CONVERSION'] = ichimoku[1]
-        
-            # ADX
-            adx = ta.adx(df['high'], df['low'], df['close'])
-            df['ADX'] = adx['ADX_14']
+            # DataFrame kontrolü
+            if df.empty:
+                logging.error("DataFrame is empty. Cannot calculate advanced indicators.")
+                return df
+
+            # Ichimoku hesaplaması
+            try:
+                ichimoku = ta.ichimoku(df['high'], df['low'], df['close'])
+            
+                # Ichimoku bileşenlerini ayrı ayrı ekle
+                if isinstance(ichimoku, pd.DataFrame):
+                    column_mapping = {
+                    'ITS_9': 'ICHIMOKU_CONVERSION',
+                    'IKS_26': 'ICHIMOKU_BASE',
+                    'ISA_26': 'ICHIMOKU_SPAN_A',
+                    'ISB_52': 'ICHIMOKU_SPAN_B',
+                    'ICS_26': 'ICHIMOKU_CHIKOU'
+                    }
+                
+                    for old_col, new_col in column_mapping.items():
+                        if old_col in ichimoku.columns:
+                            df[new_col] = ichimoku[old_col]
+                        
+                logging.info("Ichimoku indicators calculated successfully")
+            
+            except Exception as ichimoku_error:
+                logging.error(f"Ichimoku calculation error: {ichimoku_error}")
+
+            # ADX hesaplaması
+            try:
+                adx = ta.adx(df['high'], df['low'], df['close'])
+                if isinstance(adx, pd.DataFrame):
+                    if 'ADX_14' in adx.columns:
+                        df['ADX'] = adx['ADX_14']
+                    elif 'ADX' in adx.columns:
+                     df['ADX'] = adx['ADX']
+                logging.info("ADX calculated successfully")
+            
+            except Exception as adx_error:
+                logging.error(f"ADX calculation error: {adx_error}")
+
+            # NaN değerleri temizle - Update this part
+            df = df.ffill().bfill()  # Using the recommended methods instead of fillna
         
             return df
-        
+
         except Exception as e:
-            logging.error(f"İleri seviye indikatör hesaplama hatası: {e}")
-        return df
+            logging.error(f"İleri seviye indikatör hesaplama hatası: {str(e)}")
+            return df
     def _calculate_atr(self, symbol: str) -> float:
         """ATR hesapla"""
         try:
@@ -241,28 +291,64 @@ class BinanceFuturesBot:
         return {'type': 'NONE', 'probability': 0.0}
 
     def generate_signals(self, df: pd.DataFrame) -> dict:
+        """Teknik analiz sinyalleri üret"""
         try:
-            last_row = df.iloc[-1]
-            
-            # RSI sinyalleri
-            rsi_signal = 'SELL' if last_row['RSI'] > 70 else 'BUY' if last_row['RSI'] < 30 else 'HOLD'
-            
-            # MACD sinyalleri
-            macd_signal = 'BUY' if last_row['MACD'] > last_row['MACD_SIGNAL'] else 'SELL'
-            
-            # Bollinger Bands sinyalleri
-            bb_signal = 'BUY' if last_row['close'] < last_row['BB_LOWER'] else 'SELL' if last_row['close'] > last_row['BB_UPPER'] else 'HOLD'
-            
-            # Sinyal kombinasyonu
-            if rsi_signal == macd_signal and bb_signal != 'HOLD':
-                return {'type': rsi_signal}
-            
-            return {'type': 'HOLD'}
-            
-        except Exception as e:
-            logging.error(f"Teknik sinyal üretim hatası: {e}")
-            return {'type': 'NONE'}
+            required_columns = ['RSI', 'MACD', 'MACD_SIGNAL', 'BB_UPPER', 'BB_LOWER']
+        
+            # Gerekli sütunların varlığını kontrol et
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            if df.empty or missing_columns:
+                logging.warning(f"Missing columns for signal generation: {missing_columns}")
+                return {'type': 'NONE', 'reason': 'missing_data'}
 
+            last_row = df.iloc[-1]
+            signals = []
+
+            # RSI Sinyali
+            if 'RSI' in df.columns:
+                rsi = last_row['RSI']
+            if rsi < 30:
+                signals.append('BUY')
+            elif rsi > 70:
+                signals.append('SELL')
+
+        # MACD Sinyali
+            if all(col in df.columns for col in ['MACD', 'MACD_SIGNAL']):
+                if last_row['MACD'] > last_row['MACD_SIGNAL']:
+                    signals.append('BUY')
+                else:
+                    signals.append('SELL')
+
+            # Bollinger Bands Sinyali
+            if all(col in df.columns for col in ['BB_UPPER', 'BB_LOWER']):
+                if last_row['close'] < last_row['BB_LOWER']:
+                 signals.append('BUY')
+                elif last_row['close'] > last_row['BB_UPPER']:
+                    signals.append('SELL')
+
+            # Ichimoku Sinyali
+            ichimoku_columns = ['ICHIMOKU_CONVERSION', 'ICHIMOKU_BASE']
+            if all(col in df.columns for col in ichimoku_columns):
+                if last_row['ICHIMOKU_CONVERSION'] > last_row['ICHIMOKU_BASE']:
+                    signals.append('BUY')
+                else:
+                    signals.append('SELL')
+
+            # Sinyal kararı
+            if signals:
+                buy_signals = signals.count('BUY')
+                sell_signals = signals.count('SELL')
+            
+            if buy_signals > sell_signals:
+                return {'type': 'BUY', 'strength': buy_signals / len(signals)}
+            elif sell_signals > buy_signals:
+                return {'type': 'SELL', 'strength': sell_signals / len(signals)}
+
+            return {'type': 'HOLD', 'strength': 0}
+
+        except Exception as e:
+            logging.error(f"Signal generation error: {str(e)}")
+            return {'type': 'NONE', 'reason': 'error'}
     def _validate_signals(self, ml_signal: dict, technical_signal: dict) -> bool:
         """Sinyalleri doğrula"""
         try:
@@ -346,21 +432,48 @@ class BinanceFuturesBot:
             f"Probability: {signal['probability']:.2f}"
         )
         await self.send_telegram(message)
+def _verify_indicators(self, df: pd.DataFrame) -> bool:
+    """Hesaplanan göstergeleri doğrula"""
+    required_indicators = ['RSI', 'MACD', 'MACD_SIGNAL', 'BB_UPPER', 'BB_LOWER']
+    
+    # Göstergelerin varlığını kontrol et
+    missing = [ind for ind in required_indicators if ind not in df.columns]
+    if missing:
+        logging.warning(f"Missing indicators: {missing}")
+        return False
+        
+    # NaN değerleri kontrol et
+    nan_columns = df[required_indicators].columns[df[required_indicators].isna().any()].tolist()
+    if nan_columns:
+        logging.warning(f"Columns with NaN values: {nan_columns}")
+        return False
+        
+    return True        
 
-    async def run(self):
-        """Ana bot döngüsü"""
-        logging.info(f"Bot started by {self.config.get('created_by', 'unknown')}")
-        await self.send_telegram("🚀 Trading Bot Activated")
+async def run(self):
+    """Ana bot döngüsü"""
+    logging.info(f"Bot started by {self.config.get('created_by', 'unknown')}")
+    await self.send_telegram("🚀 Trading Bot Activated")
 
-        while True:
-            try:
-                if self.is_trading_allowed():
-                    for symbol in self.config['symbols']:
-                        df = self.get_klines(symbol)
-                        if df.empty:
-                            continue
+    while True:
+        try:
+            if self.is_trading_allowed():
+                for symbol in self.config['symbols']:
+                    # 1. Önce mum verilerini al
+                    df = self.get_klines(symbol)
+                    if df.empty:
+                        logging.warning(f"Boş veri alındı - {symbol}")
+                        continue
 
-                        df = self.calculate_advanced_indicators(df)
+                    # 2. Temel göstergeleri hesapla
+                    logging.info(f"{symbol} için temel göstergeler hesaplanıyor...")
+                    df = self.calculate_indicators(df)  # Bu fonksiyonu ÖNCE çağır
+                    
+                    # 3. İleri seviye göstergeleri hesapla
+                    df = self.calculate_advanced_indicators(df)
+                    
+                    # 4. Göstergeleri kontrol et
+                    if self._verify_indicators(df):
                         ml_signal = self.generate_ml_signals(df)
                         technical_signal = self.generate_signals(df)
 
@@ -369,15 +482,15 @@ class BinanceFuturesBot:
                             await self.execute_trade_with_risk_management(
                                 symbol, ml_signal, current_price
                             )
+                    else:
+                        logging.warning(f"{symbol} için göstergeler eksik")
 
-                        await asyncio.sleep(self.rate_limit_delay)
+                    await asyncio.sleep(self.rate_limit_delay)
 
-                await asyncio.sleep(self.config['check_interval'])
-
-            except Exception as e:
-                logging.error(f"Main loop error: {e}")
-                await self.send_telegram(f"⚠️ Error: {e}")
-                await asyncio.sleep(60)
+        except Exception as e:
+            logging.error(f"Main loop error: {e}")
+            await self.send_telegram(f"⚠️ Error: {e}")
+            await asyncio.sleep(60)
 
 if __name__ == "__main__":
     logging.basicConfig(
