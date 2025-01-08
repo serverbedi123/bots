@@ -413,16 +413,18 @@ class BinanceFuturesBot:
             logging.error(f"Pozisyon büyüklüğü hesaplama hatası: {e}")
             return 0
         
-    def get_symbol_info(self, symbol: str):
+    def get_symbol_info(self, symbol: str) -> dict:
         """Sembol bilgilerini al"""
         try:
-            # Sync versiyonu kullan
             exchange_info = self.client.exchange_info()
             for s in exchange_info['symbols']:
                 if s['symbol'] == symbol:
                     return {
                         'pricePrecision': s['pricePrecision'],
-                        'quantityPrecision': s['quantityPrecision']
+                        'quantityPrecision': s['quantityPrecision'],
+                        'minQty': float(next(f['minQty'] for f in s['filters'] if f['filterType'] == 'LOT_SIZE')),
+                        'maxQty': float(next(f['maxQty'] for f in s['filters'] if f['filterType'] == 'LOT_SIZE')),
+                        'stepSize': float(next(f['stepSize'] for f in s['filters'] if f['filterType'] == 'LOT_SIZE'))
                     }
             return None
         except Exception as e:
@@ -434,60 +436,99 @@ class BinanceFuturesBot:
         factor = 10 ** precision
         return float(round(value * factor) / factor)
 
-    async def execute_trade_with_risk_management(self, symbol: str, signal_type: str, current_price: float):
+    async def execute_trade_with_risk_management(self, symbol: str, signal_type: dict, current_price: float):
         """İşlem yönetimi ve risk kontrolü"""
         try:
-            # Minimum işlem büyüklüğünü düşür
-            await self.client.change_leverage(symbol=symbol, leverage=5)
-            min_quantity = 0.001  # Veya sembolün izin verdiği minimum miktar
+            # Signal type'ı düzelt
+            trade_side = signal_type['type']  # 'BUY' veya 'SELL' değerini al
         
+            # Kaldıraç ayarı (sync)
+            try:
+                self.client.change_leverage(
+                    symbol=symbol,
+                    leverage=5
+                )
+                logging.info(f"Kaldıraç ayarlandı: {symbol} 5x")
+            except Exception as e:
+                logging.error(f"Kaldıraç ayarlama hatası: {e}")
+                return False
+
             # Hesap bakiyesini al
-            balance = self.get_account_balance()
+            balance = float(self.get_account_balance())
             logging.info(f"Mevcut bakiye: {balance} USDT")
-        
-            # Risk miktarını düşür
-            risk_percentage = 0.95  # Bakiyenin %95'ini kullan
-            quantity = (balance * risk_percentage) / current_price
-        
+
+            # Pozisyon büyüklüğünü hesapla
+            risk_percentage = 0.95  # Bakiyenin %95'i
+            position_value = balance * risk_percentage
+            quantity = position_value / current_price
+
             # Sembol bilgilerini al
             symbol_info = self.get_symbol_info(symbol)
             if symbol_info:
                 quantity = self.round_to_precision(quantity, symbol_info['quantityPrecision'])
-                logging.info(f"Hesaplanan işlem miktarı: {quantity}")
+                price = self.round_to_precision(current_price, symbol_info['pricePrecision'])
+        
+            logging.info(f"Hesaplanan işlem miktarı: {quantity}")
+
+            # Market emri oluştur
+            try:
+                order = self.client.new_order(
+                    symbol=symbol,
+                    side=trade_side,
+                    type='MARKET',
+                    quantity=quantity
+                )
+
+                #    Stop Loss ve Take Profit hesapla
+                sl_price = price * (0.98 if trade_side == 'BUY' else 1.02)
+                tp_price = price * (1.03 if trade_side == 'BUY' else 0.97)
+
+                # Stop Loss emri
+                sl_order = self.client.new_order(
+                    symbol=symbol,
+                    side='SELL' if trade_side == 'BUY' else 'BUY',
+                    type='STOP_MARKET',
+                    stopPrice=self.round_to_precision(sl_price, symbol_info['pricePrecision']),
+                    closePosition='true'
+                )
+
+                # Take Profit emri
+                tp_order = self.client.new_order(
+                    symbol=symbol,
+                    side='SELL' if trade_side == 'BUY' else 'BUY',
+                    type='TAKE_PROFIT_MARKET',
+                    stopPrice=self.round_to_precision(tp_price, symbol_info['pricePrecision']),
+                    closePosition='true'
+                )
+
+                # İşlem başarılı mesajı
+                message = (
+                    f"🎯 İşlem Gerçekleşti\n"
+                    f"Sembol: {symbol}\n"
+                    f"Yön: {trade_side}\n"
+                    f"Miktar: {quantity}\n"
+                    f"Fiyat: {price}\n"
+                    f"Stop Loss: {sl_price}\n"
+                    f"Take Profit: {tp_price}\n"
+                    f"Kaldıraç: 5x"
+                )
             
-                if quantity >= min_quantity:
-                    try:
-                        order = self.client.new_order(
-                            symbol=symbol,
-                            side=signal_type,
-                            type='MARKET',
-                            quantity=quantity
-                        )
-                    
-                        logging.info(f"İşlem gerçekleşti: {symbol}, Tip: {signal_type}, Miktar: {quantity}")
-                        await self.send_telegram(
-                            f"🎯 İşlem Gerçekleşti\n"
-                            f"Sembol: {symbol}\n"
-                            f"Yön: {signal_type}\n"
-                            f"Miktar: {quantity}\n"
-                            f"Fiyat: {current_price}"
-                        )
-                        return True
-                    
-                    except Exception as order_error:
-                        logging.error(f"Order hatası: {order_error}")
-                        await self.send_telegram(f"⚠️ İşlem Hatası: {str(order_error)}")
-                else:
-                    logging.warning(f"İşlem miktarı çok düşük: {quantity} < {min_quantity}")
-                
+                logging.info(f"İşlem başarılı: {symbol} {trade_side} {quantity}")
+                await self.send_telegram(message)
+            
+                return True
+
+            except Exception as order_error:
+                logging.error(f"Order yerleştirme hatası: {order_error}")
+                await self.send_telegram(f"⚠️ İşlem Hatası: {symbol} - {str(order_error)}")
+                return False
+
         except Exception as e:
             logging.error(f"İşlem yönetimi hatası: {e}")
-            await self.send_telegram(f"⚠️ Hata: {str(e)}")
-    
-        return False
+            await self.send_telegram(f"⚠️ İşlem Yönetimi Hatası: {symbol} - {str(e)}")
+            return False
 
-
-    def get_account_balance(self):
+    def get_account_balance(self) -> float:
         """Hesap bakiyesini al"""
         try:
             account = self.client.balance()
@@ -547,7 +588,9 @@ class BinanceFuturesBot:
                             if self._validate_signals(ml_signal, technical_signal):
                                 current_price = float(df['close'].iloc[-1])
                                 await self.execute_trade_with_risk_management(
-                                    symbol, ml_signal, current_price
+                                symbol=symbol,
+                                signal_type=ml_signal,  # ml_signal bir dict olmalı
+                                current_price=current_price
                                 )
 
                             # Rate limit kontrolü
