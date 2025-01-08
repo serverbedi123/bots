@@ -16,26 +16,19 @@ from telegram import Bot
 import time
 import sys  # Add this import
 # Config dosyasını yükle
-# Config dosyasını yükle
 with open("config.json") as f:
     config = json.load(f)
 
 # Binance API bilgileri
 api_key = config["api_key"]
-# RSA API için api_secret gerekmez
-use_testnet = config.get("use_testnet", True)
+api_secret = config["api_secret"]
 
 # Telegram API bilgileri
 telegram_bot_token = config["telegram_bot_token"]
 chat_id = config["telegram_chat_id"]
 
-# Binance bağlantısı (RSA için)
-client = Client(
-    api_key=api_key,
-    api_secret=None,  # RSA için None olmalı
-    testnet=use_testnet,
-    rsa_key=True  # RSA kullanımını belirt
-)
+# Binance bağlantısı
+client = Client(api_key, api_secret)
 
 # Loglama ayarları
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -533,93 +526,104 @@ def verify_api_permissions():
         logging.error(f"Error type: {type(e).__name__}")
         return False
     
+
 def initialize_binance_client():
     try:
-        logging.info("Initializing Binance client with RSA authentication...")
+        logging.info("Initializing Binance client...")
         
-        # RSA API client oluştur
-        client = Client(
-            api_key=api_key,
-            api_secret=None,  # RSA için None
-            testnet=use_testnet,
-            rsa_key=True
-        )
-        logging.info("✓ RSA API client initialized")
-        
-        # Bağlantıyı test et
-        try:
-            client.ping()
-            logging.info("✓ Connection test successful")
-        except BinanceAPIException as e:
-            logging.error(f"Connection test failed: {e}")
+        # 1. İlk olarak API izinlerini kontrol et
+        if not verify_api_permissions():
+            logging.error("API permissions verification failed")
             return None
             
-        # Futures API'yi test et
+        # 2. Test client'ı oluştur
+        test_client = Client(api_key, api_secret, testnet=True)
+        logging.info("✓ Test client created successfully")
+        
+        # 3. Futures API'sini test et
+        # Futures dinleme anahtarı oluştur
+        listen_key = test_client.futures_create_listen_key()
+        logging.info("✓ Futures listen key created")
+        
+        # Pozisyon modunu kontrol et
         try:
-            futures_account = client.futures_account()
-            logging.info("✓ Futures account access successful")
-        except BinanceAPIException as e:
-            logging.error(f"Futures account access failed: {e}")
-            return None
-            
-        # Position mode'u ayarla
-        try:
-            client.futures_change_position_mode(dualSidePosition=False)
+            test_client.futures_change_position_mode(dualSidePosition=False)
             logging.info("✓ Position mode set to one-way")
         except BinanceAPIException as e:
-            if e.code != -4059:  # Zaten one-way modda
-                logging.error(f"Failed to set position mode: {e}")
-                return None
+            if e.code != -4059:  # Zaten one-way modda ise
+                raise e
             logging.info("✓ Already in one-way position mode")
             
-        # Test sembolü ile marjin tipini ayarla
+        # 4. Önce tek bir sembol ile test et
         test_symbol = "BTCUSDT"
         try:
-            client.futures_change_margin_type(
-                symbol=test_symbol,
-                marginType='ISOLATED'
-            )
+            # Marjin tipini ayarla
+            test_client.futures_change_margin_type(symbol=test_symbol, marginType='ISOLATED')
             logging.info(f"✓ Set {test_symbol} to ISOLATED margin")
         except BinanceAPIException as e:
-            if e.code != -4046:  # Zaten ISOLATED
-                logging.error(f"Failed to set margin type: {e}")
+            if e.code != -4046:  # Zaten ISOLATED ise
+                logging.error(f"Error setting margin type: {e}")
                 return None
             logging.info(f"✓ {test_symbol} already in ISOLATED margin")
             
-        # Sembolleri yapılandır
+        # Kaldıracı ayarla
+        try:
+            test_client.futures_change_leverage(symbol=test_symbol, leverage=leverage)
+            logging.info(f"✓ Set {test_symbol} leverage to {leverage}x")
+        except BinanceAPIException as e:
+            logging.error(f"Error setting leverage: {e}")
+            if e.code == -2015:
+                logging.error("\nTo fix this issue:")
+                logging.error("1. Go to Binance Futures")
+                logging.error("2. Enable Futures trading if not already enabled")
+                logging.error("3. Create a new API key with these permissions:")
+                logging.error("   - Enable Futures Trading")
+                logging.error("   - Enable Spot & Margin Trading")
+                logging.error("4. Disable IP restrictions temporarily")
+            return None
+            
+        # 5. Ana client'ı oluştur
+        client = Client(api_key, api_secret, testnet=True)
+        logging.info("✓ Main client initialized successfully")
+        
+        # 6. Tüm sembolleri yapılandır
         for symbol in symbols:
             try:
-                # Marjin tipi
+                # Her sembol için marjin tipini ayarla
                 try:
-                    client.futures_change_margin_type(
-                        symbol=symbol,
-                        marginType='ISOLATED'
-                    )
+                    client.futures_change_margin_type(symbol=symbol, marginType='ISOLATED')
                 except BinanceAPIException as e:
-                    if e.code != -4046:
+                    if e.code != -4046:  # Zaten ISOLATED değilse
+                        logging.warning(f"Could not set margin type for {symbol}: {e}")
                         continue
-                        
-                # Kaldıraç
-                client.futures_change_leverage(
-                    symbol=symbol,
-                    leverage=leverage
-                )
+                
+                # Her sembol için kaldıracı ayarla
+                client.futures_change_leverage(symbol=symbol, leverage=leverage)
                 logging.info(f"✓ Configured {symbol}: ISOLATED margin, {leverage}x leverage")
                 
             except BinanceAPIException as e:
                 logging.warning(f"Could not configure {symbol}: {e}")
                 continue
                 
+            # Semboller arası kısa bekleme
             time.sleep(0.1)
-            
+        
         return client
         
     except BinanceAPIException as e:
-        logging.error(f"Failed to initialize RSA client: {e}")
+        logging.error(f"Error initializing Binance client: {e}")
+        if e.code == -2015:
+            logging.error("\nAPI Permission Error. Please check:")
+            logging.error("1. Futures trading is enabled on your account")
+            logging.error("2. API key has correct permissions")
+            logging.error("3. IP restrictions are disabled")
+            logging.error("4. You have sufficient funds in Futures wallet")
         return None
+        
     except Exception as e:
         logging.error(f"Unexpected error: {str(e)}")
         return None
+
 def verify_futures_account():
     try:
         test_client = Client(api_key, api_secret)
@@ -773,36 +777,20 @@ def load_config():
         with open("config.json") as f:
             config = json.load(f)
             
-        # RSA API kontrolü
-        if not config.get('api_key'):
-            logging.error("RSA API key is missing in config.json")
-            return None
-            
-        # API key format kontrolü
-        if len(config['api_key']) != 64:
-            logging.error("Invalid RSA API key format")
-            return None
-            
-        # Config validasyonu
-        required_fields = [
-            'api_key', 'symbols', 'leverage', 
-            'risk_per_trade', 'timeframe', 'limit',
-            'telegram_bot_token', 'telegram_chat_id'
-        ]
-        
-        for field in required_fields:
-            if field not in config:
-                logging.error(f"Missing required field in config.json: {field}")
-                return None
-                
-        # Sembolleri kontrol et
-        if not isinstance(config['symbols'], list):
+        # Validate symbol format
+        if not isinstance(config.get('symbols', []), list):
             logging.error("'symbols' must be a list in config.json")
             return None
             
-        # Sembolleri büyük harfe çevir
+        # Convert symbols to uppercase
         config['symbols'] = [s.upper() for s in config['symbols']]
         
+        # Validate symbol format
+        for symbol in config['symbols']:
+            if not symbol.endswith('USDT'):
+                logging.error(f"Invalid symbol format: {symbol}. Must end with USDT for futures trading")
+                return None
+                
         return config
         
     except FileNotFoundError:
@@ -812,8 +800,8 @@ def load_config():
         logging.error("Invalid JSON in config.json")
         return None
     except Exception as e:
-        logging.error(f"Error loading config: {str(e)}")
-        return None
+        logging.error(f"Error loading config: {e}")
+        return None  
 def monitor_symbol_status():
     try:
         test_client = Client(api_key, api_secret)
