@@ -10,8 +10,9 @@ import pandas_ta as ta
 from binance.um_futures import UMFutures
 from binance.error import ClientError
 from telegram import Bot
-from lightgbm import LGBMClassifier
+from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GridSearchCV
 import joblib
 
 class BinanceFuturesBot:
@@ -59,9 +60,16 @@ class BinanceFuturesBot:
             if field not in config:
                 raise ValueError(f"Eksik config alanı: {field}")
 
-    def _initialize_model(self) -> LGBMClassifier:
-        """Initialize LightGBM Model"""
-        return LGBMClassifier(n_estimators=200, learning_rate=0.05, max_depth=6, random_state=42)
+    def _initialize_model(self) -> GradientBoostingClassifier:
+        """Initialize Gradient Boosting Model with hyperparameter tuning"""
+        param_grid = {
+            'n_estimators': [100, 200, 300],
+            'learning_rate': [0.01, 0.05, 0.1],
+            'max_depth': [3, 4, 5]
+        }
+        model = GradientBoostingClassifier(random_state=42)
+        grid_search = GridSearchCV(model, param_grid, cv=5, n_jobs=-1, scoring='accuracy')
+        return grid_search
 
     async def send_telegram(self, message: str) -> None:
         """Telegram mesajı gönder"""
@@ -103,20 +111,24 @@ class BinanceFuturesBot:
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Temel teknik indikatörleri hesapla"""
         try:
+            # Moving Averages
             df['SMA_20'] = ta.sma(df['close'], length=20)
             df['EMA_20'] = ta.ema(df['close'], length=20)
+            
+            # Bollinger Bands
             bb = ta.bbands(df['close'], length=20)
             df['BB_UPPER'] = bb['BBU_20_2.0']
             df['BB_MIDDLE'] = bb['BBM_20_2.0']
             df['BB_LOWER'] = bb['BBL_20_2.0']
+            
+            # RSI
             df['RSI'] = ta.rsi(df['close'], length=14)
+            
+            # MACD
             macd = ta.macd(df['close'])
             df['MACD'] = macd['MACD_12_26_9']
             df['MACD_SIGNAL'] = macd['MACDs_12_26_9']
-            df['ADX'] = ta.adx(df['high'], df['low'], df['close'], length=14)
-            df['STOCH'] = ta.stoch(df['high'], df['low'], df['close'])['STOCHk_14_3_3']
-            df['ICHIMOKU'] = ta.ichimoku(df['high'], df['low'])['ITS_9']
-
+            
             return df
 
         except Exception as e:
@@ -152,6 +164,29 @@ class BinanceFuturesBot:
             logging.error(f"ML sinyal üretim hatası: {e}")
             return {}
 
+    def is_trading_allowed(self) -> bool:
+        """Check if trading is allowed based on trading hours"""
+        now = datetime.now().time()
+        start_time = time(*map(int, self.config['trading_hours']['start'].split(':')))
+        end_time = time(*map(int, self.config['trading_hours']['end'].split(':')))
+        return start_time <= now <= end_time
+
+    def _calculate_position_size(self, balance: float, risk: float, volatility: float) -> float:
+        """Calculate position size based on risk management and volatility"""
+        return balance * risk / volatility
+
+    def _calculate_atr(self, df: pd.DataFrame) -> float:
+        """Calculate the Average True Range (ATR)"""
+        return ta.atr(df['high'], df['low'], df['close'])[-1]
+
+    def _calculate_dynamic_stop_loss(self, price: float, atr: float, signal_type: str, multiplier: float) -> float:
+        """Calculate dynamic stop loss based on ATR"""
+        return price - atr * multiplier if signal_type == 'BUY' else price + atr * multiplier
+
+    def _calculate_dynamic_take_profit(self, price: float, atr: float, signal_type: str, multiplier: float) -> float:
+        """Calculate dynamic take profit based on ATR"""
+        return price + atr * multiplier if signal_type == 'BUY' else price - atr * multiplier
+
     async def execute_trade_with_risk_management(self, symbol: str, signal: dict, price: float):
         """Gelişmiş risk yönetimi ile trade gerçekleştirme"""
         try:
@@ -162,17 +197,28 @@ class BinanceFuturesBot:
             if signal['type'] not in ['BUY', 'SELL']:
                 return
 
+            # Risk hesaplaması
             account = self.client.account()
             balance = float(account['totalWalletBalance'])
+            df = self.get_klines(symbol)
+            atr = self._calculate_atr(df)
             position_size = self._calculate_position_size(
                 balance,
-                self.config['risk_management']['max_loss_percentage'] / 100
+                self.config['risk_management']['max_loss_percentage'] / 100,
+                atr
             )
 
-            atr = ta.atr(self.get_klines(symbol)['high'], self.get_klines(symbol)['low'], self.get_klines(symbol)['close'])
-            stop_loss = price - atr[-1] * 2 if signal['type'] == 'BUY' else price + atr[-1] * 2
-            take_profit = price + atr[-1] * 4 if signal['type'] == 'BUY' else price - atr[-1] * 4
+            # Stop loss ve take profit
+            stop_loss = self._calculate_dynamic_stop_loss(
+                price, atr, signal['type'],
+                self.config['risk_management']['stop_loss_multiplier']
+            )
+            take_profit = self._calculate_dynamic_take_profit(
+                price, atr, signal['type'],
+                self.config['risk_management']['take_profit_multiplier']
+            )
 
+            # Order'ları gönder
             order = await self._place_orders(
                 symbol, signal['type'], position_size, stop_loss, take_profit
             )
@@ -187,16 +233,27 @@ class BinanceFuturesBot:
             logging.error(f"Trade execution hatası: {e}")
             await self.send_telegram(f"Trade hatası: {e}")
 
-    def is_trading_allowed(self) -> bool:
-        """Check if trading is allowed based on trading hours"""
-        now = datetime.now().time()
-        start_time = time(*map(int, self.config['trading_hours']['start'].split(':')))
-        end_time = time(*map(int, self.config['trading_hours']['end'].split(':')))
-        return start_time <= now <= end_time
+    def adjust_strategy_based_on_market_conditions(self, df: pd.DataFrame) -> None:
+        """Adjust strategy parameters based on market conditions."""
+        volatility = df['close'].pct_change().std()
+        if volatility > self.config['risk_management']['volatility_threshold']:
+            self.config['risk_management']['stop_loss_multiplier'] = 1.5
+            self.config['risk_management']['take_profit_multiplier'] = 3
+        else:
+            self.config['risk_management']['stop_loss_multiplier'] = 2
+            self.config['risk_management']['take_profit_multiplier'] = 4
 
-    def _calculate_position_size(self, balance: float, risk: float) -> float:
-        """Calculate position size based on risk management"""
-        return balance * risk
+    def log_performance(self):
+        """Log daily performance statistics."""
+        logging.info(f"Daily Trades: {self.daily_stats['trades']}")
+        logging.info(f"Daily Profit: {self.daily_stats['profit']}")
+        logging.info(f"Daily Losses: {self.daily_stats['losses']}")
+        logging.info(f"Daily Win Rate: {self.daily_stats['win_rate']}")
+
+    def handle_error(self, error: Exception) -> None:
+        """Handle and log errors."""
+        logging.error(f"Error: {error}")
+        asyncio.run(self.send_telegram(f"⚠️ Error: {error}"))
 
     async def _place_orders(self, symbol: str, order_type: str, position_size: float, stop_loss: float, take_profit: float) -> dict:
         """Place orders with Binance API"""
@@ -251,13 +308,15 @@ class BinanceFuturesBot:
                                 symbol, ml_signal, current_price
                             )
 
+                        self.adjust_strategy_based_on_market_conditions(df)
+                        self.log_performance()
+
                         await asyncio.sleep(self.rate_limit_delay)
 
                 await asyncio.sleep(self.config['check_interval'])
 
             except Exception as e:
-                logging.error(f"Main loop error: {e}")
-                await self.send_telegram(f"⚠️ Error: {e}")
+                self.handle_error(e)
                 await asyncio.sleep(60)
 
 if __name__ == "__main__":
