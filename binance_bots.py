@@ -375,50 +375,96 @@ class BinanceFuturesBot:
         """Pozisyon büyüklüğünü hesapla"""
         return balance * risk_per_trade * self.config['max_position_size']
 
-    async def execute_trade_with_risk_management(self, symbol: str, signal: dict, price: float):
-        """Gelişmiş risk yönetimi ile trade gerçekleştirme"""
+    def get_symbol_info(self, symbol: str):
+        """Sembol bilgilerini al"""
         try:
-            if not self.is_trading_allowed():
-                logging.info("Trading koşulları uygun değil")
-                return
-
-            if signal['type'] not in ['BUY', 'SELL']:
-                return
-
-            # Risk hesaplaması
-            account = self.client.account()
-            balance = float(account['totalWalletBalance'])
-            position_size = self._calculate_position_size(
-                balance,
-                self.config['risk_management']['max_loss_percentage'] / 100
-            )
-
-            # Stop loss ve take profit
-            atr = self._calculate_atr(symbol)
-            stop_loss = self._calculate_dynamic_stop_loss(
-                price, atr, signal['type'],
-                self.config['risk_management']['stop_loss_multiplier']
-            )
-            take_profit = self._calculate_dynamic_take_profit(
-                price, atr, signal['type'],
-                self.config['risk_management']['take_profit_multiplier']
-            )
-
-            # Order'ları gönder
-            order = await self._place_orders(
-                symbol, signal['type'], position_size, stop_loss, take_profit
-            )
-
-            if order:
-                self.daily_trades += 1
-                await self._send_trade_notification(
-                    symbol, signal, price, position_size, stop_loss, take_profit
-                )
-
+            # Sync versiyonu kullan
+            exchange_info = self.client.exchange_info()
+            for s in exchange_info['symbols']:
+                if s['symbol'] == symbol:
+                    return {
+                        'pricePrecision': s['pricePrecision'],
+                        'quantityPrecision': s['quantityPrecision']
+                    }
+            return None
         except Exception as e:
-            logging.error(f"Trade execution hatası: {e}")
-            await self.send_telegram(f"Trade hatası: {e}")
+            logging.error(f"Sembol bilgisi alma hatası: {e}")
+            return None
 
+    def round_to_precision(self, value: float, precision: int) -> float:
+        """Değeri belirtilen hassasiyete yuvarla"""
+        factor = 10 ** precision
+        return float(round(value * factor) / factor)
+
+    async def execute_trade_with_risk_management(self, symbol: str, signal_type: str, current_price: float):
+        """İşlem yönetimi ve risk kontrolü"""
+        try:
+            # Sembol bilgilerini al
+            symbol_info = self.get_symbol_info(symbol)  # await kaldırıldı
+            if not symbol_info:
+                logging.error(f"Sembol bilgisi alınamadı: {symbol}")
+                return False
+
+            # Hesap bakiyesini al
+            balance = self.get_account_balance()  # Eğer async değilse await kaldırıldı
+        
+            # Risk hesaplama (örnek: bakiyenin %1'i)
+            risk_amount = balance * self.config.get('risk_percentage', 0.01)
+        
+            # Pozisyon büyüklüğünü hesapla ve yuvarla
+            quantity = risk_amount / current_price
+            quantity = self.round_to_precision(quantity, symbol_info['quantityPrecision'])
+        
+            # İşlem fiyatını yuvarla
+            price = self.round_to_precision(current_price, symbol_info['pricePrecision'])
+
+            try:
+                if signal_type == 'BUY':
+                    order = self.client.new_order(
+                        symbol=symbol,
+                        side='BUY',
+                        type='MARKET',
+                        quantity=quantity
+                    )
+                    logging.info(f"Long pozisyon açıldı: {symbol}, Miktar: {quantity}")
+                    await self.send_telegram(f"🟢 Long Pozisyon Açıldı\nSymbol: {symbol}\nMiktar: {quantity}\nFiyat: {price}")
+                
+                elif signal_type == 'SELL':
+                    order = self.client.new_order(
+                        symbol=symbol,
+                        side='SELL',
+                        type='MARKET',
+                        quantity=quantity
+                    )
+                    logging.info(f"Short pozisyon açıldı: {symbol}, Miktar: {quantity}")
+                    await self.send_telegram(f"🔴 Short Pozisyon Açıldı\nSymbol: {symbol}\nMiktar: {quantity}\nFiyat: {price}")
+                
+                return True
+            
+            except Exception as order_error:
+                logging.error(f"Order yerleştirme hatası: {order_error}")
+                await self.send_telegram(f"⚠️ İşlem Hatası: {symbol} - {str(order_error)}")
+                return False
+            
+        except Exception as e:
+            logging.error(f"İşlem yönetimi hatası: {e}")
+            await self.send_telegram(f"⚠️ İşlem Yönetimi Hatası: {symbol} - {str(e)}")
+            return False
+        
+
+
+    def get_account_balance(self):
+        """Hesap bakiyesini al"""
+        try:
+            account = self.client.balance()
+            for asset in account:
+                if asset['asset'] == 'USDT':
+                    return float(asset['balance'])
+            return 0.0
+        except Exception as e:
+            logging.error(f"Bakiye alma hatası: {e}")
+            return 0.0
+          
     async def _send_trade_notification(self, symbol, signal, price, size, sl, tp):
         """Trade bildirimini gönder"""
         message = (
@@ -432,67 +478,66 @@ class BinanceFuturesBot:
             f"Probability: {signal['probability']:.2f}"
         )
         await self.send_telegram(message)
-def _verify_indicators(self, df: pd.DataFrame) -> bool:
-    """Hesaplanan göstergeleri doğrula"""
-    required_indicators = ['RSI', 'MACD', 'MACD_SIGNAL', 'BB_UPPER', 'BB_LOWER']
-    
-    # Göstergelerin varlığını kontrol et
-    missing = [ind for ind in required_indicators if ind not in df.columns]
-    if missing:
-        logging.warning(f"Missing indicators: {missing}")
-        return False
-        
-    # NaN değerleri kontrol et
-    nan_columns = df[required_indicators].columns[df[required_indicators].isna().any()].tolist()
-    if nan_columns:
-        logging.warning(f"Columns with NaN values: {nan_columns}")
-        return False
-        
-    return True        
 
-async def run(self):
-    """Ana bot döngüsü"""
-    logging.info(f"Bot started by {self.config.get('created_by', 'unknown')}")
-    await self.send_telegram("🚀 Trading Bot Activated")
 
-    while True:
+    async def run(self):
+        """Ana bot döngüsü"""
         try:
-            if self.is_trading_allowed():
-                for symbol in self.config['symbols']:
-                    # 1. Önce mum verilerini al
-                    df = self.get_klines(symbol)
-                    if df.empty:
-                        logging.warning(f"Boş veri alındı - {symbol}")
-                        continue
+            logging.info(f"Bot started by {self.config.get('created_by', 'unknown')}")
+            await self.send_telegram("🚀 Trading Bot Activated")
+        
+            while True:
+                try:
+                    # Trading saatleri kontrolü
+                    if self.is_trading_allowed():
+                        for symbol in self.config['symbols']:
+                            # Mum verilerini al
+                            df = self.get_klines(symbol)
+                            if df.empty:
+                                logging.warning(f"No data received for {symbol}")
+                                continue
 
-                    # 2. Temel göstergeleri hesapla
-                    logging.info(f"{symbol} için temel göstergeler hesaplanıyor...")
-                    df = self.calculate_indicators(df)  # Bu fonksiyonu ÖNCE çağır
-                    
-                    # 3. İleri seviye göstergeleri hesapla
-                    df = self.calculate_advanced_indicators(df)
-                    
-                    # 4. Göstergeleri kontrol et
-                    if self._verify_indicators(df):
-                        ml_signal = self.generate_ml_signals(df)
-                        technical_signal = self.generate_signals(df)
+                            # Temel göstergeleri hesapla
+                            df = self.calculate_indicators(df)
+                            logging.info(f"Basic indicators calculated for {symbol}")
 
-                        if self._validate_signals(ml_signal, technical_signal):
-                            current_price = float(df['close'].iloc[-1])
-                            await self.execute_trade_with_risk_management(
-                                symbol, ml_signal, current_price
-                            )
-                    else:
-                        logging.warning(f"{symbol} için göstergeler eksik")
+                            # İleri seviye göstergeleri hesapla
+                            df = self.calculate_advanced_indicators(df)
+                            logging.info(f"Advanced indicators calculated for {symbol}")
 
-                    await asyncio.sleep(self.rate_limit_delay)
+                         # ML ve teknik sinyalleri üret
+                            ml_signal = self.generate_ml_signals(df)
+                            technical_signal = self.generate_signals(df)
+
+                            # Sinyalleri doğrula
+                            if self._validate_signals(ml_signal, technical_signal):
+                                current_price = float(df['close'].iloc[-1])
+                                await self.execute_trade_with_risk_management(
+                                    symbol, ml_signal, current_price
+                                )
+
+                            # Rate limit kontrolü
+                            await asyncio.sleep(self.rate_limit_delay)
+
+                    # Günlük istatistikleri sıfırla
+                    if datetime.now().date() > self.last_daily_reset:
+                        self.reset_daily_stats()
+
+                    # Ana döngü bekleme süresi
+                    await asyncio.sleep(self.config['check_interval'])
+
+                except Exception as loop_error:
+                    logging.error(f"Loop iteration error: {loop_error}")
+                    await self.send_telegram(f"⚠️ Error in main loop: {loop_error}")
+                    await asyncio.sleep(60)  # Hata durumunda 1 dakika bekle
 
         except Exception as e:
-            logging.error(f"Main loop error: {e}")
-            await self.send_telegram(f"⚠️ Error: {e}")
-            await asyncio.sleep(60)
+            logging.error(f"Critical error in run method: {e}")
+            await self.send_telegram("🚨 Bot stopped due to critical error!")
+            raise
 
 if __name__ == "__main__":
+    # Logging ayarları
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -500,8 +545,12 @@ if __name__ == "__main__":
     )
 
     try:
+        # Bot instance'ını oluştur
         bot = BinanceFuturesBot()
+        
+        # Modern asyncio kullanımı
         asyncio.run(bot.run())
+        
     except KeyboardInterrupt:
         logging.info("Bot stopped by user")
     except Exception as e:
