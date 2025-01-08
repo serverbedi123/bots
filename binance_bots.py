@@ -119,49 +119,44 @@ class BinanceFuturesBot:
             # Moving Averages
             df['SMA_20'] = ta.sma(df['close'], length=20)
             df['EMA_20'] = ta.ema(df['close'], length=20)
-            
+        
             # Bollinger Bands
             bb = ta.bbands(df['close'], length=20)
             df['BB_UPPER'] = bb['BBU_20_2.0']
             df['BB_MIDDLE'] = bb['BBM_20_2.0']
             df['BB_LOWER'] = bb['BBL_20_2.0']
-            
+        
             # RSI
             df['RSI'] = ta.rsi(df['close'], length=14)
-            
+        
             # MACD
             macd = ta.macd(df['close'])
             df['MACD'] = macd['MACD_12_26_9']
             df['MACD_SIGNAL'] = macd['MACDs_12_26_9']
-            
+        
             return df
-            
+        
         except Exception as e:
             logging.error(f"İndikatör hesaplama hatası: {e}")
-            return df
+        return df
 
     def calculate_advanced_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """İleri seviye indikatörleri hesapla"""
         try:
-            # Ichimoku
+        # Ichimoku
             ichimoku = ta.ichimoku(df['high'], df['low'], df['close'])
-            df['ICHIMOKU_BASE'] = ichimoku['ITS_9']
-            df['ICHIMOKU_CONVERSION'] = ichimoku['IKS_26']
-            
+            df['ICHIMOKU_BASE'] = ichimoku[0]
+            df['ICHIMOKU_CONVERSION'] = ichimoku[1]
+        
             # ADX
             adx = ta.adx(df['high'], df['low'], df['close'])
             df['ADX'] = adx['ADX_14']
-            
-            # Fibonacci Retracement Levels (example calculation)
-            df['FIB_LEVEL_1'] = df['close'] + (df['high'] - df['low']) * 0.382
-            df['FIB_LEVEL_2'] = df['close'] + (df['high'] - df['low']) * 0.618
-            
+        
             return df
-            
+        
         except Exception as e:
             logging.error(f"İleri seviye indikatör hesaplama hatası: {e}")
-            return df
-
+        return df
     def _calculate_atr(self, symbol: str) -> float:
         """ATR hesapla"""
         try:
@@ -224,25 +219,26 @@ class BinanceFuturesBot:
             return None
 
     def generate_ml_signals(self, df: pd.DataFrame) -> dict:
+        """ML sinyalleri üret"""
         try:
-            # Özellik isimlerini belirterek DataFrame oluştur
+        # Özellik isimlerini belirterek DataFrame oluştur
             feature_names = ['open', 'high', 'low', 'close', 'volume']
             features = df[feature_names].iloc[-1].to_frame().T
-            
+        
             # Ölçeklendirme işlemi
             scaled_features = self.scaler.transform(features)
-            
+        
             # Tahmin
             prediction = self.model.predict(scaled_features)
             probability = self.model.predict_proba(scaled_features)[0][prediction[0]]
-            
+        
             return {
-                'type': 'BUY' if prediction[0] == 1 else 'SELL',
-                'probability': probability
-            }
+            'type': 'BUY' if prediction[0] == 1 else 'SELL',
+            'probability': probability
+        }
         except Exception as e:
             logging.error(f"ML sinyal üretim hatası: {e}")
-            return {'type': 'NONE', 'probability': 0.0}
+        return {'type': 'NONE', 'probability': 0.0}
 
     def generate_signals(self, df: pd.DataFrame) -> dict:
         try:
