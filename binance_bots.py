@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, time
 import time as time_module
 from typing import Dict, List, Optional
 import numpy as np
@@ -12,7 +12,6 @@ from binance.error import ClientError
 from telegram import Bot
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split, GridSearchCV
 import joblib
 
 class BinanceFuturesBot:
@@ -27,7 +26,8 @@ class BinanceFuturesBot:
         self.positions = {}
         self.last_api_call = 0
         self.rate_limit_delay = 0.1
-        self.model, self.scaler = self._load_ml_model_and_scaler()
+        self.model = self._load_ml_model()
+        self.scaler = self._load_scaler()
         self.daily_trades = 0
         self.daily_stats = {
             'trades': 0,
@@ -51,11 +51,30 @@ class BinanceFuturesBot:
         """Config dosyasını doğrula"""
         required_fields = [
             'api_key', 'api_secret', 'telegram_token', 'telegram_chat_id',
-            'symbols', 'risk_management', 'trading_hours', 'timeframes'
+            'symbols', 'risk_management', 'trading_hours', 'timeframes',
+            'ml_model_path', 'scaler_path'
         ]
         for field in required_fields:
             if field not in config:
                 raise ValueError(f"Eksik config alanı: {field}")
+
+    def _load_ml_model(self) -> GradientBoostingClassifier:
+        """Makine öğrenimi modelini yükle"""
+        try:
+            model = joblib.load(self.config['ml_model_path'])
+            return model
+        except Exception as e:
+            logging.error(f"ML model yükleme hatası: {e}")
+            raise
+
+    def _load_scaler(self) -> StandardScaler:
+        """Ölçekleyiciyi yükle"""
+        try:
+            scaler = joblib.load(self.config['scaler_path'])
+            return scaler
+        except Exception as e:
+            logging.error(f"Scaler yükleme hatası: {e}")
+            raise
 
     async def send_telegram(self, message: str) -> None:
         """Telegram mesajı gönder"""
@@ -68,24 +87,15 @@ class BinanceFuturesBot:
             except Exception as e:
                 logging.error(f"Telegram mesaj hatası: {e}")
 
-    def get_klines(self, symbol: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
+    def get_klines(self, symbol: str) -> pd.DataFrame:
         """Mum verilerini al"""
         try:
             timeframe = self.config['timeframes']['default']
-            if start_date and end_date:
-                klines = self.client.klines(
-                    symbol=symbol,
-                    interval=timeframe,
-                    limit=100,
-                    startTime=int(pd.Timestamp(start_date).timestamp() * 1000),
-                    endTime=int(pd.Timestamp(end_date).timestamp() * 1000)
-                )
-            else:
-                klines = self.client.klines(
-                    symbol=symbol,
-                    interval=timeframe,
-                    limit=100
-                )
+            klines = self.client.klines(
+                symbol=symbol,
+                interval=timeframe,
+                limit=100
+            )
             
             df = pd.DataFrame(klines, columns=[
                 'timestamp', 'open', 'high', 'low', 'close', 'volume',
@@ -104,7 +114,7 @@ class BinanceFuturesBot:
             return pd.DataFrame()
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Teknik indikatörleri hesapla"""
+        """Temel teknik indikatörleri hesapla"""
         try:
             # Moving Averages
             df['SMA_20'] = ta.sma(df['close'], length=20)
@@ -124,24 +134,130 @@ class BinanceFuturesBot:
             df['MACD'] = macd['MACD_12_26_9']
             df['MACD_SIGNAL'] = macd['MACDs_12_26_9']
             
-            # Ichimoku Clouds
-            ichimoku = ta.ichimoku(df['high'], df['low'], df['close'])
-            df['ICHIMOKU_BASE'] = ichimoku['ISA_9']
-            df['ICHIMOKU_CONVERSION'] = ichimoku['ITS_9']
-            
-            # ADX
-            adx = ta.adx(df['high'], df['low'], df['close'])
-            df['ADX'] = adx['ADX_14']
-            
-            # Fibonacci Retracement Levels (Example for a specific range)
-            df['FIB_LEVEL_1'] = df['close'].max() - (0.618 * (df['close'].max() - df['close'].min()))
-            df['FIB_LEVEL_2'] = df['close'].max() - (0.382 * (df['close'].max() - df['close'].min()))
-            
             return df
             
         except Exception as e:
             logging.error(f"İndikatör hesaplama hatası: {e}")
             return df
+
+    def calculate_advanced_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """İleri seviye indikatörleri hesapla"""
+        try:
+            # Ichimoku
+            ichimoku = ta.ichimoku(df['high'], df['low'], df['close'])
+            df['ICHIMOKU_BASE'] = ichimoku['ITS_9']
+            df['ICHIMOKU_CONVERSION'] = ichimoku['IKS_26']
+            
+            # ADX
+            adx = ta.adx(df['high'], df['low'], df['close'])
+            df['ADX'] = adx['ADX_14']
+            
+            # Fibonacci Retracement Levels (example calculation)
+            df['FIB_LEVEL_1'] = df['close'] + (df['high'] - df['low']) * 0.382
+            df['FIB_LEVEL_2'] = df['close'] + (df['high'] - df['low']) * 0.618
+            
+            return df
+            
+        except Exception as e:
+            logging.error(f"İleri seviye indikatör hesaplama hatası: {e}")
+            return df
+
+    def _calculate_atr(self, symbol: str) -> float:
+        """ATR hesapla"""
+        try:
+            df = self.get_klines(symbol)
+            atr = ta.atr(df['high'], df['low'], df['close'], length=14)
+            return atr.iloc[-1]
+        except Exception as e:
+            logging.error(f"ATR hesaplama hatası: {e}")
+            return 0.0
+
+    def _calculate_dynamic_stop_loss(self, price: float, atr: float, trade_type: str, multiplier: float) -> float:
+        """Dinamik stop loss hesapla"""
+        if trade_type == 'BUY':
+            return price - (atr * multiplier)
+        elif trade_type == 'SELL':
+            return price + (atr * multiplier)
+
+    def _calculate_dynamic_take_profit(self, price: float, atr: float, trade_type: str, multiplier: float) -> float:
+        """Dinamik take profit hesapla"""
+        if trade_type == 'BUY':
+            return price + (atr * multiplier)
+        elif trade_type == 'SELL':
+            return price - (atr * multiplier)
+
+    async def _place_orders(self, symbol: str, trade_type: str, position_size: float, stop_loss: float, take_profit: float):
+        """Order'ları yerleştir"""
+        try:
+            if trade_type == 'BUY':
+                order = self.client.new_order(
+                    symbol=symbol,
+                    side='BUY',
+                    type='MARKET',
+                    quantity=position_size
+                )
+            elif trade_type == 'SELL':
+                order = self.client.new_order(
+                    symbol=symbol,
+                    side='SELL',
+                    type='MARKET',
+                    quantity=position_size
+                )
+            # Add stop loss and take profit orders
+            sl_order = self.client.new_order(
+                symbol=symbol,
+                side='SELL' if trade_type == 'BUY' else 'BUY',
+                type='STOP_MARKET',
+                stopPrice=stop_loss,
+                quantity=position_size
+            )
+            tp_order = self.client.new_order(
+                symbol=symbol,
+                side='SELL' if trade_type == 'BUY' else 'BUY',
+                type='TAKE_PROFIT_MARKET',
+                stopPrice=take_profit,
+                quantity=position_size
+            )
+            return order
+        except Exception as e:
+            logging.error(f"Order yerleştirme hatası: {e}")
+            return None
+
+    def generate_ml_signals(self, df: pd.DataFrame) -> dict:
+        """ML sinyalleri üret"""
+        try:
+            features = df.iloc[-1].drop(['timestamp', 'close_time']).values.reshape(1, -1)
+            scaled_features = self.scaler.transform(features)
+            prediction = self.model.predict(scaled_features)
+            probability = self.model.predict_proba(scaled_features)[0][prediction[0]]
+            return {'type': 'BUY' if prediction[0] == 1 else 'SELL', 'probability': probability}
+        except Exception as e:
+            logging.error(f"ML sinyal üretim hatası: {e}")
+            return {'type': 'NONE', 'probability': 0.0}
+
+    def generate_signals(self, df: pd.DataFrame) -> dict:
+        """Teknik sinyalleri üret"""
+        try:
+            last_row = df.iloc[-1]
+            if last_row['RSI'] > 70 and last_row['MACD'] < last_row['MACD_SIGNAL']:
+                return {'type': 'SELL'}
+            elif last_row['RSI'] < 30 and last_row['MACD'] > last_row['MACD_SIGNAL']:
+                return {'type': 'BUY'}
+            else:
+                return {'type': 'HOLD'}
+        except Exception as e:
+            logging.error(f"Teknik sinyal üretim hatası: {e}")
+            return {'type': 'NONE'}
+
+    def _validate_signals(self, ml_signal: dict, technical_signal: dict) -> bool:
+        """Sinyalleri doğrula"""
+        try:
+            if ml_signal['type'] == technical_signal['type'] and ml_signal['type'] != 'NONE':
+                return True
+            return False
+        except Exception as e:
+            logging.error(f"Sinyal doğrulama hatası: {e}")
+            return False
 
     def is_trading_allowed(self) -> bool:
         """Trading koşullarını kontrol et"""
@@ -158,20 +274,6 @@ class BinanceFuturesBot:
     def _calculate_position_size(self, balance: float, risk_per_trade: float) -> float:
         """Pozisyon büyüklüğünü hesapla"""
         return balance * risk_per_trade * self.config['max_position_size']
-
-    def _calculate_dynamic_stop_loss(self, price: float, atr: float, trade_type: str, multiplier: float) -> float:
-        """Dinamik stop loss hesapla"""
-        if trade_type == 'BUY':
-            return price - (atr * multiplier)
-        elif trade_type == 'SELL':
-            return price + (atr * multiplier)
-
-    def _calculate_dynamic_take_profit(self, price: float, atr: float, trade_type: str, multiplier: float) -> float:
-        """Dinamik take profit hesapla"""
-        if trade_type == 'BUY':
-            return price + (atr * multiplier)
-        elif trade_type == 'SELL':
-            return price - (atr * multiplier)
 
     async def execute_trade_with_risk_management(self, symbol: str, signal: dict, price: float):
         """Gelişmiş risk yönetimi ile trade gerçekleştirme"""
@@ -231,63 +333,11 @@ class BinanceFuturesBot:
         )
         await self.send_telegram(message)
 
-    def _load_ml_model_and_scaler(self):
-        """Makine öğrenimi modelini ve scaler'ı yükle"""
-        try:
-            model = joblib.load("ml_model.pkl")
-            scaler = joblib.load("scaler.pkl")
-            
-            return model, scaler
-            
-        except Exception as e:
-            logging.error(f"Model veya scaler yükleme hatası: {e}")
-            raise
-
-    def backtest(self, symbol: str, start_date: str, end_date: str):
-        """Botun performansını geçmiş verilerle test et"""
-        try:
-            df = self.get_klines(symbol, start_date, end_date)
-            if df.empty:
-                logging.error("Geçmiş veri alınamadı")
-                return
-            
-            df = self.calculate_indicators(df)
-            df = self._prepare_data(df)
-            signals = self.generate_signals(df)
-            
-            # Performans metriği
-            profit = 0
-            for index, row in df.iterrows():
-                if row['signal'] == 'BUY':
-                    profit += row['close'] - row['open']
-                elif row['signal'] == 'SELL':
-                    profit += row['open'] - row['close']
-            
-            logging.info(f"Backtest sonucu: {profit}")
-            
-        except Exception as e:
-            logging.error(f"Backtesting hatası: {e}")
-
-    def _prepare_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Veri ön işleme ve özellik mühendisliği"""
-        df = df.dropna()
-        features = [
-            'SMA_20', 'EMA_20', 'BB_UPPER', 'BB_MIDDLE', 'BB_LOWER',
-            'RSI', 'MACD', 'MACD_SIGNAL', 'ICHIMOKU_BASE', 'ICHIMOKU_CONVERSION',
-            'ADX', 'FIB_LEVEL_1', 'FIB_LEVEL_2'
-        ]
-        df[features] = self.scaler.transform(df[features])
-        return df
-
     async def run(self):
         """Ana bot döngüsü"""
         logging.info(f"Bot started by {self.config.get('created_by', 'unknown')}")
         await self.send_telegram("🚀 Trading Bot Activated")
 
-        # İlk başta backtesting yapalım
-        for symbol in self.config['symbols']:
-            self.backtest(symbol, '2021-01-01', '2021-12-31')
-        
         while True:
             try:
                 if self.is_trading_allowed():
@@ -296,8 +346,7 @@ class BinanceFuturesBot:
                         if df.empty:
                             continue
 
-                        df = self.calculate_indicators(df)
-                        df = self._prepare_data(df)
+                        df = self.calculate_advanced_indicators(df)
                         ml_signal = self.generate_ml_signals(df)
                         technical_signal = self.generate_signals(df)
 
