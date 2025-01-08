@@ -226,7 +226,7 @@ class BinanceFuturesBot:
     def generate_ml_signals(self, df: pd.DataFrame) -> dict:
         """ML sinyalleri üret"""
         try:
-            features = df.iloc[-1].drop(['timestamp', 'close_time']).values.reshape(1, -1)
+            features = df.iloc[-1][['open', 'high', 'low', 'close', 'volume']].values.reshape(1, -1)
             scaled_features = self.scaler.transform(features)
             prediction = self.model.predict(scaled_features)
             probability = self.model.predict_proba(scaled_features)[0][prediction[0]]
