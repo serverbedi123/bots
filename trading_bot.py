@@ -16,19 +16,26 @@ from telegram import Bot
 import time
 import sys  # Add this import
 # Config dosyasını yükle
+# Config dosyasını yükle
 with open("config.json") as f:
     config = json.load(f)
 
 # Binance API bilgileri
 api_key = config["api_key"]
-api_secret = config["api_secret"]
+# RSA API için api_secret gerekmez
+use_testnet = config.get("use_testnet", True)
 
 # Telegram API bilgileri
 telegram_bot_token = config["telegram_bot_token"]
 chat_id = config["telegram_chat_id"]
 
-# Binance bağlantısı
-client = Client(api_key, api_secret)
+# Binance bağlantısı (RSA için)
+client = Client(
+    api_key=api_key,
+    api_secret=None,  # RSA için None olmalı
+    testnet=use_testnet,
+    rsa_key=True  # RSA kullanımını belirt
+)
 
 # Loglama ayarları
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -528,120 +535,91 @@ def verify_api_permissions():
     
 def initialize_binance_client():
     try:
-        logging.info("Initializing Binance client with RSA API...")
+        logging.info("Initializing Binance client with RSA authentication...")
         
-        # RSA API için client başlatma
+        # RSA API client oluştur
         client = Client(
-            api_key=config['api_key'],
-            api_secret=None,  # RSA API için secret gerekmez
-            rsa_key=True,     # RSA API kullanımını belirt
-            testnet=config.get('use_testnet', True)
+            api_key=api_key,
+            api_secret=None,  # RSA için None
+            testnet=use_testnet,
+            rsa_key=True
         )
         logging.info("✓ RSA API client initialized")
         
-        # Bağlantı testi
-        client.ping()
-        logging.info("✓ API connection test successful")
-        
-        # Futures API testi
+        # Bağlantıyı test et
         try:
-            # Futures dinleme anahtarı
-            listen_key = client.futures_create_listen_key()
-            logging.info("✓ Futures listen key created")
-            
-            # Pozisyon modu kontrolü
-            try:
-                client.futures_change_position_mode(dualSidePosition=False)
-                logging.info("✓ Position mode set to one-way")
-            except BinanceAPIException as e:
-                if e.code != -4059:  # Zaten one-way modda
-                    raise e
-                logging.info("✓ Already in one-way position mode")
-            
-            # Test sembolü yapılandırması
-            test_symbol = "BTCUSDT"
-            try:
-                # Marjin tipi ayarı
-                client.futures_change_margin_type(
-                    symbol=test_symbol,
-                    marginType='ISOLATED'
-                )
-                logging.info(f"✓ Set {test_symbol} to ISOLATED margin")
-            except BinanceAPIException as e:
-                if e.code != -4046:  # Zaten ISOLATED
-                    logging.error(f"Error setting margin type: {e}")
-                    return None
-                logging.info(f"✓ {test_symbol} already in ISOLATED margin")
-            
-            # Kaldıraç ayarı
-            client.futures_change_leverage(
-                symbol=test_symbol,
-                leverage=config['leverage']
-            )
-            logging.info(f"✓ Set leverage to {config['leverage']}x")
-            
-            # Tüm sembolleri yapılandır
-            for symbol in config['symbols']:
-                try:
-                    # Marjin tipi
-                    try:
-                        client.futures_change_margin_type(
-                            symbol=symbol,
-                            marginType='ISOLATED'
-                        )
-                    except BinanceAPIException as e:
-                        if e.code != -4046:  # Zaten ISOLATED değilse
-                            logging.warning(f"Could not set margin type for {symbol}: {e}")
-                            continue
-                    
-                    # Kaldıraç
-                    client.futures_change_leverage(
-                        symbol=symbol,
-                        leverage=config['leverage']
-                    )
-                    logging.info(f"✓ Configured {symbol}: ISOLATED margin, {config['leverage']}x leverage")
-                    
-                except BinanceAPIException as e:
-                    logging.warning(f"Could not configure {symbol}: {e}")
-                    continue
-                
-                time.sleep(0.1)  # Rate limit için bekleme
-            
-            return client
-            
+            client.ping()
+            logging.info("✓ Connection test successful")
         except BinanceAPIException as e:
-            logging.error(f"Futures API setup failed: {e}")
-            if e.code == -2015:
-                logging.error("Please check Futures trading permissions")
+            logging.error(f"Connection test failed: {e}")
             return None
             
-    except BinanceAPIException as e:
-        logging.error(f"Failed to initialize Binance client: {e}")
-        if e.code == -2015:
-            logging.error("Invalid RSA API key or permissions. Please check:")
-            logging.error("1. RSA API key is correct")
-            logging.error("2. Futures trading is enabled")
-            logging.error("3. API permissions are properly set")
-            logging.error("4. IP restrictions are disabled")
-        return None
+        # Futures API'yi test et
+        try:
+            futures_account = client.futures_account()
+            logging.info("✓ Futures account access successful")
+        except BinanceAPIException as e:
+            logging.error(f"Futures account access failed: {e}")
+            return None
+            
+        # Position mode'u ayarla
+        try:
+            client.futures_change_position_mode(dualSidePosition=False)
+            logging.info("✓ Position mode set to one-way")
+        except BinanceAPIException as e:
+            if e.code != -4059:  # Zaten one-way modda
+                logging.error(f"Failed to set position mode: {e}")
+                return None
+            logging.info("✓ Already in one-way position mode")
+            
+        # Test sembolü ile marjin tipini ayarla
+        test_symbol = "BTCUSDT"
+        try:
+            client.futures_change_margin_type(
+                symbol=test_symbol,
+                marginType='ISOLATED'
+            )
+            logging.info(f"✓ Set {test_symbol} to ISOLATED margin")
+        except BinanceAPIException as e:
+            if e.code != -4046:  # Zaten ISOLATED
+                logging.error(f"Failed to set margin type: {e}")
+                return None
+            logging.info(f"✓ {test_symbol} already in ISOLATED margin")
+            
+        # Sembolleri yapılandır
+        for symbol in symbols:
+            try:
+                # Marjin tipi
+                try:
+                    client.futures_change_margin_type(
+                        symbol=symbol,
+                        marginType='ISOLATED'
+                    )
+                except BinanceAPIException as e:
+                    if e.code != -4046:
+                        continue
+                        
+                # Kaldıraç
+                client.futures_change_leverage(
+                    symbol=symbol,
+                    leverage=leverage
+                )
+                logging.info(f"✓ Configured {symbol}: ISOLATED margin, {leverage}x leverage")
+                
+            except BinanceAPIException as e:
+                logging.warning(f"Could not configure {symbol}: {e}")
+                continue
+                
+            time.sleep(0.1)
+            
+        return client
         
+    except BinanceAPIException as e:
+        logging.error(f"Failed to initialize RSA client: {e}")
+        return None
     except Exception as e:
         logging.error(f"Unexpected error: {str(e)}")
         return None
-        
-    except BinanceAPIException as e:
-        if e.code == -2015:
-            logging.error("Invalid RSA API key or permissions. Please check:")
-            logging.error("1. RSA API key is correct")
-            logging.error("2. Futures trading is enabled")
-            logging.error("3. API permissions are properly set")
-            logging.error("4. IP restrictions are disabled")
-        return None
-        
-    except Exception as e:
-        logging.error(f"Unexpected error: {str(e)}")
-        return None
-
 def verify_futures_account():
     try:
         test_client = Client(api_key, api_secret)
