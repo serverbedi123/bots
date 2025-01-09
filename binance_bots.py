@@ -440,7 +440,17 @@ class BinanceFuturesBot:
         """İşlem yönetimi ve risk kontrolü"""
         try:
             trade_side = signal_type
-        
+
+            # Hesap bakiyesini al
+            balance = float(self.get_account_balance())
+            logging.info(f"Mevcut bakiye: {balance} USDT")
+
+            # Check if balance is below 5 USD
+            if balance < 5.0:
+                logging.warning(f"Yetersiz bakiye: {balance} USDT. İşlem yapılmayacak.")
+                await self.send_telegram(f"⚠️ Yetersiz bakiye: {balance} USDT. İşlem yapılmayacak.")
+                return False
+
             # Kaldıraç ayarı
             try:
                 self.client.change_leverage(
@@ -452,10 +462,6 @@ class BinanceFuturesBot:
                 logging.error(f"Kaldıraç ayarlama hatası: {e}")
                 return False
 
-            # Hesap bakiyesini al
-            balance = float(self.get_account_balance())
-            logging.info(f"Mevcut bakiye: {balance} USDT")
-
             # Sembol bilgilerini al
             symbol_info = self.get_symbol_info(symbol)
             if not symbol_info:
@@ -465,24 +471,24 @@ class BinanceFuturesBot:
             # Minimum işlem değeri (5.1 USDT) için quantity hesaplama
             min_notional = 5.2  # Biraz daha yüksek tutalım
             min_quantity = min_notional / current_price
-        
+
             # Risk bazlı quantity hesaplama
             risk_percentage = 0.95
             risk_based_quantity = (balance * risk_percentage) / current_price
-        
+
             # İkisinden büyük olanı seç
             quantity = max(min_quantity, risk_based_quantity)
-        
+
             # Quantity'yi sembol hassasiyetine yuvarla
             quantity = self.round_to_precision(quantity, symbol_info['quantityPrecision'])
             price = self.round_to_precision(current_price, symbol_info['pricePrecision'])
-        
-                # Son kontrol
+
+            # Son kontrol
             final_notional = quantity * price
             logging.info(f"Final işlem değeri: {final_notional} USDT")
-        
+
             if final_notional < min_notional:
-                # Quantity'yi tekrar ayarla
+            # Quantity'yi tekrar ayarla
                 quantity = self.round_to_precision((min_notional / price) * 1.01, symbol_info['quantityPrecision'])
                 final_notional = quantity * price
                 logging.info(f"Quantity yeniden ayarlandı: {quantity} ({final_notional} USDT)")
@@ -519,7 +525,7 @@ class BinanceFuturesBot:
                 )
 
                 message = (
-                    f"🎯 İşlem Gerçekleşti\n"
+                    f"✅ İşlem Gerçekleşti\n"
                     f"Sembol: {symbol}\n"
                     f"Yön: {trade_side}\n"
                     f"Miktar: {quantity}\n"
@@ -530,10 +536,10 @@ class BinanceFuturesBot:
                     f"Kaldıraç: 5x\n"
                     f"Bakiye: {balance} USDT"
                 )
-            
+
                 logging.info(f"İşlem başarılı: {symbol} {trade_side} {quantity}")
                 await self.send_telegram(message)
-            
+
                 return True
 
             except Exception as order_error:
@@ -545,15 +551,11 @@ class BinanceFuturesBot:
             logging.error(f"İşlem yönetimi hatası: {e}")
             await self.send_telegram(f"⚠️ İşlem Yönetimi Hatası: {symbol} - {str(e)}")
             return False
-        except Exception as e:
-            logging.error(f"İşlem yönetimi hatası: {e}")
-            await self.send_telegram(f"⚠️ İşlem Yönetimi Hatası: {symbol} - {str(e)}")
-            return False
     
-    def get_account_balance(self) -> float:
-        """Hesap bakiyesini al"""
+    def get_account_balance(self):
+        """Hesap bakiyesini al (Vadeli işlemler hesabı)"""
         try:
-            account = self.client.balance()
+            account = self.client.futures_account_balance()
             for asset in account:
                 if asset['asset'] == 'USDT':
                     return float(asset['balance'])
