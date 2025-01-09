@@ -441,13 +441,13 @@ class BinanceFuturesBot:
         try:
             trade_side = signal_type
         
-            # Kaldıraç ayarı - 20x'e çıkaralım
+            # Kaldıraç ayarı
             try:
                 self.client.change_leverage(
                     symbol=symbol,
-                    leverage=13  # Kaldıracı artırdık
+                    leverage=5
                 )
-                logging.info(f"Kaldıraç ayarlandı: {symbol} 20x")
+                logging.info(f"Kaldıraç ayarlandı: {symbol} 5x")
             except Exception as e:
                 logging.error(f"Kaldıraç ayarlama hatası: {e}")
                 return False
@@ -462,16 +462,13 @@ class BinanceFuturesBot:
                 logging.error(f"Sembol bilgisi alınamadı: {symbol}")
                 return False
 
-            # İşlem değeri hesaplama (kaldıraç ile)
-            min_notional = 5.2
-            leverage = 13
+            # Minimum işlem değeri (5.1 USDT) için quantity hesaplama
+            min_notional = 5.2  # Biraz daha yüksek tutalım
+            min_quantity = min_notional / current_price
         
-            # Minimum quantity hesaplama (kaldıraçlı)
-            min_quantity = (min_notional / leverage) / current_price
-        
-            # Risk bazlı quantity hesaplama (bakiyenin %90'ı)
-            risk_percentage = 0.90  # Riski düşürdük
-            risk_based_quantity = ((balance * risk_percentage) / leverage) / current_price
+            # Risk bazlı quantity hesaplama
+            risk_percentage = 0.95
+            risk_based_quantity = (balance * risk_percentage) / current_price
         
             # İkisinden büyük olanı seç
             quantity = max(min_quantity, risk_based_quantity)
@@ -480,18 +477,18 @@ class BinanceFuturesBot:
             quantity = self.round_to_precision(quantity, symbol_info['quantityPrecision'])
             price = self.round_to_precision(current_price, symbol_info['pricePrecision'])
         
-            # Son kontrol (kaldıraçlı değer)
-            final_notional = quantity * price * leverage
-            logging.info(f"Final işlem değeri (kaldıraçlı): {final_notional} USDT")
+                # Son kontrol
+            final_notional = quantity * price
+            logging.info(f"Final işlem değeri: {final_notional} USDT")
         
-            if (quantity * price) < (min_notional / leverage):
+            if final_notional < min_notional:
                 # Quantity'yi tekrar ayarla
-                quantity = self.round_to_precision(((min_notional / leverage) / price) * 1.01, symbol_info['quantityPrecision'])
-                final_notional = quantity * price * leverage
-                logging.info(f"Quantity yeniden ayarlandı: {quantity} (Kaldıraçlı değer: {final_notional} USDT)")
+                quantity = self.round_to_precision((min_notional / price) * 1.01, symbol_info['quantityPrecision'])
+                final_notional = quantity * price
+                logging.info(f"Quantity yeniden ayarlandı: {quantity} ({final_notional} USDT)")
 
+            # Market emri oluştur
             try:
-                # İşlem tipini ayarla
                 order = self.client.new_order(
                     symbol=symbol,
                     side=trade_side,
@@ -499,9 +496,9 @@ class BinanceFuturesBot:
                     quantity=quantity
                 )
 
-                # Stop Loss ve Take Profit hesapla (daha dar)
-                sl_price = price * (0.99 if trade_side == 'BUY' else 1.01)  # %1 SL
-                tp_price = price * (1.015 if trade_side == 'BUY' else 0.985)  # %1.5 TP
+                # Stop Loss ve Take Profit hesapla
+                sl_price = price * (0.98 if trade_side == 'BUY' else 1.02)
+                tp_price = price * (1.03 if trade_side == 'BUY' else 0.97)
 
                 # Stop Loss emri
                 sl_order = self.client.new_order(
@@ -512,7 +509,7 @@ class BinanceFuturesBot:
                     closePosition='true'
                 )
 
-                #    Take Profit emri
+                # Take Profit emri
                 tp_order = self.client.new_order(
                     symbol=symbol,
                     side='SELL' if trade_side == 'BUY' else 'BUY',
@@ -527,11 +524,10 @@ class BinanceFuturesBot:
                     f"Yön: {trade_side}\n"
                     f"Miktar: {quantity}\n"
                     f"Fiyat: {price}\n"
-                    f"İşlem Değeri: {quantity * price:.4f} USDT\n"
-                    f"Kaldıraçlı Değer: {final_notional:.4f} USDT\n"
+                    f"İşlem Değeri: {final_notional:.2f} USDT\n"
                     f"Stop Loss: {sl_price}\n"
                     f"Take Profit: {tp_price}\n"
-                    f"Kaldıraç: 20x\n"
+                    f"Kaldıraç: 5x\n"
                     f"Bakiye: {balance} USDT"
                 )
             
@@ -545,6 +541,10 @@ class BinanceFuturesBot:
                 await self.send_telegram(f"⚠️ İşlem Hatası: {symbol} - {str(order_error)}")
                 return False
 
+        except Exception as e:
+            logging.error(f"İşlem yönetimi hatası: {e}")
+            await self.send_telegram(f"⚠️ İşlem Yönetimi Hatası: {symbol} - {str(e)}")
+            return False
         except Exception as e:
             logging.error(f"İşlem yönetimi hatası: {e}")
             await self.send_telegram(f"⚠️ İşlem Yönetimi Hatası: {symbol} - {str(e)}")
